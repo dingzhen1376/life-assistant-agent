@@ -9,9 +9,7 @@ import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.stereotype.Component;
 
-@Component
 public class LifeManusAgent extends ToolCallAgent {
 
     public LifeManusAgent(ToolCallback[] allTools, ChatModel dashscopeChatModel, StringRedisTemplate stringRedisTemplate) {
@@ -39,14 +37,13 @@ public class LifeManusAgent extends ToolCallAgent {
                 """);
         this.setMaxSteps(20);
 
-        //添加基于redis的chatmemory
         ChatMemory chatMemory = MessageWindowChatMemory.builder()
                 .chatMemoryRepository(RedisChatMemoryRepository.builder()
                         .stringRedisTemplate(stringRedisTemplate)
                         .build())
-                .maxMessages(100)//记录的历史消息条数
+                .maxMessages(100)
                 .build();
-        //初始化基于dashscope的chatclient
+        //TODO 解决每一步思考的结果都会被放进redis，我需要找到一个方法，只保存最后一次的思考结果
         this.setChatClient(ChatClient.builder(dashscopeChatModel)
                 .defaultAdvisors(new MyLoggerAdvisor())
                 .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())

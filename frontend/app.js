@@ -1,12 +1,11 @@
 const STORAGE_KEY = "life-manus-frontend-state";
-const DEFAULT_API_BASE = "http://localhost:8124/api";
+const DEFAULT_API_BASE = "/api";
 
 const state = loadState();
 let activeEventSource = null;
 
 const els = {
   body: document.body,
-  sidebar: document.getElementById("sidebar"),
   threadList: document.getElementById("threadList"),
   messageRegion: document.getElementById("messageRegion"),
   emptyState: document.getElementById("emptyState"),
@@ -28,6 +27,7 @@ const els = {
 init();
 
 function init() {
+  migrateThreads();
   els.body.classList.toggle("dark", state.theme === "dark");
   if (!state.threads.length) {
     createThread();
@@ -61,7 +61,9 @@ function bindEvents() {
   });
 
   els.stopBtn.addEventListener("click", stopStreaming);
+
   els.newChatBtn.addEventListener("click", () => {
+    stopStreaming();
     createThread();
     renderThreads();
     renderMessages();
@@ -113,9 +115,10 @@ function bindEvents() {
 function sendMessage(text) {
   const thread = currentThread();
   thread.messages.push({ role: "user", content: text, createdAt: Date.now() });
-  if (thread.title === "新对话") {
+  if (!thread.title || thread.title === "新对话") {
     thread.title = text.slice(0, 22);
   }
+
   els.messageInput.value = "";
   autoResizeInput();
   renderThreads();
@@ -126,7 +129,12 @@ function sendMessage(text) {
   thread.messages.push(assistantMessage);
   renderMessages();
 
-  const url = `${state.apiBase || DEFAULT_API_BASE}/ai/life/chat/sse?message=${encodeURIComponent(text)}`;
+  const params = new URLSearchParams({
+    message: text,
+    chatId: thread.chatId,
+  });
+  const url = `${state.apiBase || DEFAULT_API_BASE}/ai/life/chat/sse?${params.toString()}`;
+
   activeEventSource = new EventSource(url);
   els.connectionState.textContent = "生成中";
 
@@ -138,7 +146,7 @@ function sendMessage(text) {
 
   activeEventSource.onerror = () => {
     if (!assistantMessage.content.trim()) {
-      assistantMessage.content = "连接失败。请确认后端已启动、API 地址正确，并检查浏览器跨域限制。";
+      assistantMessage.content = "连接失败。请确认后端、Redis 和 Nginx 代理已经启动，并检查 API 地址配置。";
     } else {
       assistantMessage.content += "\n\n[连接已结束]";
     }
@@ -171,8 +179,9 @@ function renderThreads() {
     button.type = "button";
     button.className = `thread-item${thread.id === state.activeThreadId ? " active" : ""}`;
     button.textContent = thread.title || "新对话";
-    button.title = thread.title || "新对话";
+    button.title = `chatId: ${thread.chatId}`;
     button.addEventListener("click", () => {
+      stopStreaming();
       state.activeThreadId = thread.id;
       persist();
       renderThreads();
@@ -205,7 +214,7 @@ function renderMessages() {
     els.messageRegion.appendChild(row);
   });
 
-  els.messageRegion.scrollTop = els.messageRegion.scrollHeight;
+  scrollMessagesToBottom();
 }
 
 function renderMarkdownLite(text) {
@@ -222,12 +231,24 @@ function formatSseChunk(chunk) {
   if (!chunk) {
     return "";
   }
-  return chunk.endsWith("\n") ? chunk : `${chunk}\n`;
+  const normalized = chunk
+    .replaceAll("\\r\\n", "\n")
+    .replaceAll("\\n", "\n")
+    .replaceAll("\\t", "  ");
+  return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
+}
+
+function scrollMessagesToBottom() {
+  requestAnimationFrame(() => {
+    els.messageRegion.scrollTop = els.messageRegion.scrollHeight;
+  });
 }
 
 function createThread() {
+  const chatId = createUuid();
   const thread = {
-    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+    id: chatId,
+    chatId,
     title: "新对话",
     messages: [],
     createdAt: Date.now(),
@@ -243,7 +264,36 @@ function currentThread() {
   if (!thread) {
     thread = createThread();
   }
+  if (!thread.chatId) {
+    thread.chatId = createUuid();
+    persist();
+  }
   return thread;
+}
+
+function migrateThreads() {
+  let changed = false;
+  state.threads.forEach((thread) => {
+    if (!thread.id) {
+      thread.id = createUuid();
+      changed = true;
+    }
+    if (!thread.chatId) {
+      thread.chatId = isUuid(thread.id) ? thread.id : createUuid();
+      changed = true;
+    }
+    if (!Array.isArray(thread.messages)) {
+      thread.messages = [];
+      changed = true;
+    }
+    if (!thread.title) {
+      thread.title = "新对话";
+      changed = true;
+    }
+  });
+  if (changed) {
+    persist();
+  }
 }
 
 function loadState() {
@@ -271,6 +321,9 @@ function persist() {
 
 function normalizeApiBase(value) {
   const trimmed = String(value || DEFAULT_API_BASE).trim();
+  if (trimmed === "/") {
+    return "";
+  }
   return trimmed.replace(/\/+$/, "");
 }
 
@@ -302,4 +355,17 @@ async function pingHealth() {
   } catch {
     els.connectionState.textContent = "未连接";
   }
+}
+
+function createUuid() {
+  if (crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (char) =>
+    (Number(char) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> Number(char) / 4).toString(16)
+  );
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value || "");
 }

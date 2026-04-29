@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.Map;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/ai/life")
@@ -27,12 +28,19 @@ public class LifeAssistantController {
     }
 
     @GetMapping("/chat")
-    public String chat(String message) {
-        return lifeAssistantApp.chat(message);
+    public String chat(String message, String chatId) {
+        return lifeAssistantApp.chat(message, normalizeChatId(chatId));
     }
 
     @GetMapping(value = "/chat/sse", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(String message) {
-        return lifeAssistantApp.chatStream(message);
+    public SseEmitter chatStream(String message, String chatId) {
+        return lifeAssistantApp.chatStream(message, normalizeChatId(chatId));
+    }
+
+    private String normalizeChatId(String chatId) {
+        if (chatId == null || chatId.isBlank()) {
+            return UUID.randomUUID().toString();
+        }
+        return chatId.trim();
     }
 }

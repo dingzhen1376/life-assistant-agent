@@ -20,11 +20,15 @@ public class LifeAssistantApp {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    public String chat(String message) {
-        return new LifeManusAgent(allTools, dashscopeChatModel, stringRedisTemplate).run(message);
+    public String chat(String message, String chatId) {
+        return createAgent().run(message, chatId);
     }
 
-    public SseEmitter chatStream(String message) {
-        return new LifeManusAgent(allTools, dashscopeChatModel, stringRedisTemplate).runStream(message);
+    public SseEmitter chatStream(String message, String chatId) {
+        return createAgent().runStream(message, chatId);
+    }
+
+    private LifeManusAgent createAgent() {
+        return new LifeManusAgent(allTools, dashscopeChatModel, stringRedisTemplate);
     }
 }

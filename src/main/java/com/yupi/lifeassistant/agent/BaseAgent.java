@@ -12,6 +12,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 @Data
@@ -25,17 +26,19 @@ public abstract class BaseAgent {
     private int currentStep = 0;
     private int maxSteps = 10;
     private ChatClient chatClient;
+    private String chatId;
     private List<Message> messageList = new ArrayList<>();
 
-    public String run(String userPrompt) {
+    public String run(String userPrompt, String chatId) {
         validateBeforeRun(userPrompt);
+        this.chatId = normalizeChatId(chatId);
         this.state = AgentState.RUNNING;
         this.messageList.add(new UserMessage(userPrompt));
         List<String> results = new ArrayList<>();
         try {
             for (int i = 0; i < maxSteps && state != AgentState.FINISHED; i++) {
                 currentStep = i + 1;
-                log.info("{} executing step {}/{}", name, currentStep, maxSteps);
+                log.info("{} executing step {}/{} with chatId={}", name, currentStep, maxSteps, this.chatId);
                 results.add("Step " + currentStep + ": " + step());
             }
             if (currentStep >= maxSteps && state != AgentState.FINISHED) {
@@ -52,9 +55,9 @@ public abstract class BaseAgent {
         }
     }
 
-    public SseEmitter runStream(String userPrompt) {
+    public SseEmitter runStream(String userPrompt, String chatId) {
         SseEmitter emitter = new SseEmitter(300_000L);
-        CompletableFuture.runAsync(() -> runStreamInternal(userPrompt, emitter));
+        CompletableFuture.runAsync(() -> runStreamInternal(userPrompt, chatId, emitter));
         emitter.onTimeout(() -> {
             this.state = AgentState.ERROR;
             cleanup();
@@ -69,14 +72,15 @@ public abstract class BaseAgent {
         return emitter;
     }
 
-    private void runStreamInternal(String userPrompt, SseEmitter emitter) {
+    private void runStreamInternal(String userPrompt, String chatId, SseEmitter emitter) {
         try {
             validateBeforeRun(userPrompt);
+            this.chatId = normalizeChatId(chatId);
             this.state = AgentState.RUNNING;
             this.messageList.add(new UserMessage(userPrompt));
             for (int i = 0; i < maxSteps && state != AgentState.FINISHED; i++) {
                 currentStep = i + 1;
-                log.info("{} executing stream step {}/{}", name, currentStep, maxSteps);
+                log.info("{} executing stream step {}/{} with chatId={}", name, currentStep, maxSteps, this.chatId);
                 emitter.send("Step " + currentStep + ": " + step());
             }
             if (currentStep >= maxSteps && state != AgentState.FINISHED) {
@@ -107,11 +111,19 @@ public abstract class BaseAgent {
         }
     }
 
+    private String normalizeChatId(String chatId) {
+        if (StrUtil.isBlank(chatId)) {
+            return UUID.randomUUID().toString();
+        }
+        return chatId.trim();
+    }
+
     public abstract String step();
 
     protected void cleanup() {
         this.currentStep = 0;
         this.state = AgentState.IDLE;
+        this.chatId = null;
         this.messageList = new ArrayList<>();
     }
 }
