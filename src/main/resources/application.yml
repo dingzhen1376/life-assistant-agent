@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: life-assistant-agent
+  ai:
+    dashscope:
+      api-key: ${ai.my-api-key}
+      chat:
+        options:
+          model: qwen-plus-2025-07-28
+  data:
+    redis:
+      host: ${docker.localhost}
+      port: 6379
+  profiles:
+    active: local
+
+server:
+  port: 8124
+  servlet:
+    context-path: /api
+
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: default
+      paths-to-match: /**
+      packages-to-scan: com.yupi.lifeassistant.controller
+
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+life-assistant:
+  workspace: ${LIFE_ASSISTANT_WORKSPACE:D:/codex/life-assistant-agent/tmp}
