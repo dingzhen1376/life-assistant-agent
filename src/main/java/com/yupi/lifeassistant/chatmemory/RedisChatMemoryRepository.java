@@ -106,6 +106,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
 		String content = switch (message.getMessageType()) {
 			case USER, ASSISTANT, SYSTEM -> message.getText() != null ? message.getText() : "";
 			// 与 Jdbc 版本保持一致：ToolResponseMessage 不保存实际内容
+            //TODO 添加每次工具调用的结果作为助手消息
 			case TOOL -> "";
 		};
 

@@ -43,7 +43,7 @@ public class LifeManusAgent extends ToolCallAgent {
                         .build())
                 .maxMessages(100)
                 .build();
-        //TODO 解决每一步思考的结果都会被放进redis，我需要找到一个方法，只保存最后一次的思考结果
+        //解决每一步思考的结果都会被放进redis，我需要找到一个方法，只保存最后一次的思考结果
         //问题在MessageChatMemoryAdvisor.before()方法
         this.setChatClient(ChatClient.builder(dashscopeChatModel)
                 .defaultAdvisors(new MyLoggerAdvisor())

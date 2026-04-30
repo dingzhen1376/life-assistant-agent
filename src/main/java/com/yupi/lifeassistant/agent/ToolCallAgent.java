@@ -43,7 +43,7 @@ public class ToolCallAgent extends ReActAgent {
 
     @Override
     public boolean think() {
-        if (StrUtil.isNotBlank(getNextStepPrompt())) {
+        if (getCurrentStep() > 1 && StrUtil.isNotBlank(getNextStepPrompt())) {
             getMessageList().add(new UserMessage(getNextStepPrompt()));
         }
         Prompt prompt = new Prompt(getMessageList(), chatOptions);
@@ -101,9 +101,11 @@ public class ToolCallAgent extends ReActAgent {
 
         boolean terminated = toolResponseMessage.getResponses().stream()
                 .anyMatch(response -> "doTerminate".equals(response.name()));
+
         String results = toolResponseMessage.getResponses().stream()
                 .map(response -> "Tool " + response.name() + " result: " + response.responseData())
                 .collect(Collectors.joining("\n"));
+
         String nonTerminateResults = toolResponseMessage.getResponses().stream()
                 .filter(response -> !"doTerminate".equals(response.name()))
                 .map(response -> String.valueOf(response.responseData()))
