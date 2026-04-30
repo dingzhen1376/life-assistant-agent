@@ -31,6 +31,7 @@ public class ToolCallAgent extends ReActAgent {
     private final ChatOptions chatOptions;
     private ChatResponse toolCallChatResponse;
     private String finalResponse;
+    private String lastToolResultSummary;
 
     public ToolCallAgent(ToolCallback[] availableTools) {
         this.availableTools = availableTools;
@@ -100,12 +101,33 @@ public class ToolCallAgent extends ReActAgent {
 
         boolean terminated = toolResponseMessage.getResponses().stream()
                 .anyMatch(response -> "doTerminate".equals(response.name()));
+        String results = toolResponseMessage.getResponses().stream()
+                .map(response -> "Tool " + response.name() + " result: " + response.responseData())
+                .collect(Collectors.joining("\n"));
+        String nonTerminateResults = toolResponseMessage.getResponses().stream()
+                .filter(response -> !"doTerminate".equals(response.name()))
+                .map(response -> String.valueOf(response.responseData()))
+                .filter(StrUtil::isNotBlank)
+                .collect(Collectors.joining("\n"));
+        if (StrUtil.isNotBlank(nonTerminateResults)) {
+            this.lastToolResultSummary = nonTerminateResults;
+        }
         if (terminated) {
             setState(AgentState.FINISHED);
         }
 
-        return toolResponseMessage.getResponses().stream()
-                .map(response -> "Tool " + response.name() + " result: " + response.responseData())
-                .collect(Collectors.joining("\n"));
+        return results;
     }
+
+    @Override
+    protected String getFinalAssistantPrompt() {
+        if (StrUtil.isNotBlank(finalResponse)) {
+            return finalResponse;
+        }
+        if (StrUtil.isNotBlank(lastToolResultSummary)) {
+            return "已完成处理，结果如下：\n" + lastToolResultSummary;
+        }
+        return "";
+    }
+    
 }

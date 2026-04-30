@@ -34,18 +34,18 @@ public abstract class BaseAgent {
         this.chatId = normalizeChatId(chatId);
         this.state = AgentState.RUNNING;
         this.messageList.add(new UserMessage(userPrompt));
-        List<String> results = new ArrayList<>();
         try {
             for (int i = 0; i < maxSteps && state != AgentState.FINISHED; i++) {
                 currentStep = i + 1;
                 log.info("{} executing step {}/{} with chatId={}", name, currentStep, maxSteps, this.chatId);
-                results.add("Step " + currentStep + ": " + step());
+                String stepResult = step();
+                log.info("{} step {} result: {}", name, currentStep, stepResult);
             }
             if (currentStep >= maxSteps && state != AgentState.FINISHED) {
                 state = AgentState.FINISHED;
-                results.add("Terminated: reached max steps (" + maxSteps + ")");
+                log.warn("{} terminated because it reached max steps ({})", name, maxSteps);
             }
-            return String.join("\n", results);
+            return getUserVisibleResponse();
         } catch (Exception e) {
             state = AgentState.ERROR;
             log.error("{} execution failed", name, e);
@@ -81,12 +81,14 @@ public abstract class BaseAgent {
             for (int i = 0; i < maxSteps && state != AgentState.FINISHED; i++) {
                 currentStep = i + 1;
                 log.info("{} executing stream step {}/{} with chatId={}", name, currentStep, maxSteps, this.chatId);
-                emitter.send("Step " + currentStep + ": " + step());
+                String stepResult = step();
+                log.info("{} stream step {} result: {}", name, currentStep, stepResult);
             }
             if (currentStep >= maxSteps && state != AgentState.FINISHED) {
                 state = AgentState.FINISHED;
-                emitter.send("Terminated: reached max steps (" + maxSteps + ")");
+                log.warn("{} stream terminated because it reached max steps ({})", name, maxSteps);
             }
+            emitter.send(getUserVisibleResponse());
             emitter.complete();
         } catch (Exception e) {
             state = AgentState.ERROR;
@@ -116,6 +118,18 @@ public abstract class BaseAgent {
             return UUID.randomUUID().toString();
         }
         return chatId.trim();
+    }
+
+    protected String getUserVisibleResponse() {
+        String finalAssistantPrompt = getFinalAssistantPrompt();
+        if (StrUtil.isNotBlank(finalAssistantPrompt)) {
+            return finalAssistantPrompt;
+        }
+        return "任务已完成。";
+    }
+
+    protected String getFinalAssistantPrompt() {
+        return "";
     }
 
     public abstract String step();
