@@ -2,6 +2,7 @@ package com.yupi.lifeassistant.agent;
 
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.agent.model.AgentState;
+import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -26,6 +27,10 @@ public abstract class BaseAgent {
     private int currentStep = 0;
     private int maxSteps = 10;
     private ChatClient chatClient;
+    private RedisChatMemoryRepository redisChatMemoryRepository;
+    //Redis中是否清除工具调用结果的Assistant消息，默认为true清除
+    private boolean cleanIntermediateToolMessages = true;
+    private boolean cleanupExecuted = false;
     private String chatId;
     private List<Message> messageList = new ArrayList<>();
 
@@ -135,9 +140,27 @@ public abstract class BaseAgent {
     public abstract String step();
 
     protected void cleanup() {
+        cleanupIntermediateToolMessagesIfNecessary();
         this.currentStep = 0;
         this.state = AgentState.IDLE;
         this.chatId = null;
+        this.cleanupExecuted = false;
         this.messageList = new ArrayList<>();
+    }
+
+    private void cleanupIntermediateToolMessagesIfNecessary() {
+        if (cleanupExecuted) {
+            return;
+        }
+        cleanupExecuted = true;
+        if (!cleanIntermediateToolMessages) {
+            return;
+        }
+        if (redisChatMemoryRepository == null || StrUtil.isBlank(chatId) || currentStep <= 1) {
+            return;
+        }
+        int deleteCount = 2 * (currentStep - 1);
+        redisChatMemoryRepository.deleteMessagesBeforeLastAssistant(chatId, deleteCount);
+        log.info("{} cleaned {} intermediate Redis messages for chatId={}", name, deleteCount, chatId);
     }
 }

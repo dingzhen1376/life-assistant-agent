@@ -37,10 +37,13 @@ public class LifeManusAgent extends ToolCallAgent {
                 """);
         this.setMaxSteps(20);
 
+        RedisChatMemoryRepository redisChatMemoryRepository = RedisChatMemoryRepository.builder()
+                .stringRedisTemplate(stringRedisTemplate)
+                .build();
+        this.setRedisChatMemoryRepository(redisChatMemoryRepository);
+
         ChatMemory chatMemory = MessageWindowChatMemory.builder()
-                .chatMemoryRepository(RedisChatMemoryRepository.builder()
-                        .stringRedisTemplate(stringRedisTemplate)
-                        .build())
+                .chatMemoryRepository(redisChatMemoryRepository)
                 .maxMessages(100)
                 .build();
         //解决每一步思考的结果都会被放进redis，我需要找到一个方法，只保存最后一次的思考结果

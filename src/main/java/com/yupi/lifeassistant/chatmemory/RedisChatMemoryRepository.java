@@ -97,6 +97,63 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
         this.stringRedisTemplate.opsForSet().remove(CONVERSATION_IDS_KEY, conversationId);
     }
 
+    public void deleteMessagesBeforeLastAssistant(String conversationId, int deleteCount) {
+        // 1. 验证参数有效性
+        Assert.hasText(conversationId, "conversationId cannot be null or empty");
+        if (deleteCount <= 0) {
+            return;
+        }
+
+        // 2. 获取所有消息
+        String key = getMessagesKey(conversationId);
+        List<String> values = this.stringRedisTemplate.opsForList().range(key, 0, -1);
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+
+        // 3. 找到最后一个 Assistant 消息的位置
+        int lastAssistantIndex = findLastMessageIndex(values, MessageType.ASSISTANT);
+        if (lastAssistantIndex <= 0) {
+            return;
+        }
+
+        // 4. 计算删除范围
+        int deleteFromIndex = Math.max(0, lastAssistantIndex - deleteCount);
+        if (deleteFromIndex >= lastAssistantIndex) {
+            return;
+        }
+
+        // 5. 构建压缩后的消息列表
+        List<String> compactedValues = new ArrayList<>(values.size() - (lastAssistantIndex - deleteFromIndex));
+        compactedValues.addAll(values.subList(0, deleteFromIndex));
+        compactedValues.addAll(values.subList(lastAssistantIndex, values.size()));
+
+        // 6. 原子性地更新 Redis 中的消息列表
+        this.stringRedisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            byte[] messageKey = this.stringRedisTemplate.getStringSerializer().serialize(key);
+            byte[] conversationIdsKey = this.stringRedisTemplate.getStringSerializer().serialize(CONVERSATION_IDS_KEY);
+            byte[] conversationIdBytes = this.stringRedisTemplate.getStringSerializer().serialize(conversationId);
+
+            connection.keyCommands().del(messageKey);
+            for (String value : compactedValues) {
+                byte[] body = this.stringRedisTemplate.getStringSerializer().serialize(value);
+                connection.listCommands().rPush(messageKey, body);
+            }
+            connection.setCommands().sAdd(conversationIdsKey, conversationIdBytes);
+            return null;
+        });
+    }
+
+    private static int findLastMessageIndex(List<String> values, MessageType messageType) {
+        String prefix = messageType.name() + SEPARATOR;
+        for (int i = values.size() - 1; i >= 0; i--) {
+            if (values.get(i) != null && values.get(i).startsWith(prefix)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
