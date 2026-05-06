@@ -79,8 +79,33 @@ public class PgVectorStoreConfig {
             for (Map.Entry<String, LifeDocumentLoader.DocumentInfo> entry : currentFiles.entrySet()) {
                 String filename = entry.getKey();
                 LifeDocumentLoader.DocumentInfo info = entry.getValue();
+                List<Document> singleMdFileDocuments = info.getDocuments();
+                String sourceFile = info.getFilename();
                 
-                // 检查该文件是否有变化（只要有一个文档变化就需要处理）
+                // 检查该md文件是否有变化（只要有一个Dcoument文档变化就需要处理）
+                // 检查有删除变化的md文件
+                // 收集该文件vector_store所有已存在的stable_id
+                Set<String> existingDocIds = jdbcTemplate.queryForList(
+                        "SELECT metadata->>'stable_id' FROM vector_store WHERE metadata->>'source_file' = ?",
+                        String.class, sourceFile
+                ).stream().filter(id -> id != null).collect(java.util.stream.Collectors.toSet());
+
+                // 收集当前md文件的所有stable_id
+                Set<String> currentDocIds = new HashSet<>();
+                for (int i = 0; i < singleMdFileDocuments.size(); i++) {
+                    Document doc = singleMdFileDocuments.get(i);
+                    String stableId = (String) doc.getMetadata().get("stable_id");
+                    currentDocIds.add(stableId);
+                }
+
+                // 删除不再存在的文档（例如文件中的某些段落被删除）
+                for (String existingId : existingDocIds) {
+                    if (!currentDocIds.contains(existingId)) {
+                        deleteDocument(existingId);
+                    }
+                }
+
+                // 检查新增和更新的md文件
                 boolean fileChanged = false;
                 for (Document doc : info.getDocuments()) {
                     String stableId = (String) doc.getMetadata().get("stable_id");
@@ -149,19 +174,13 @@ public class PgVectorStoreConfig {
     /**
      * 删除指定文件的文档
      */
-    private void deleteDocuments(PgVectorStore vectorStore, List<String> filenames) {
-        logger.info("将删除 {} 个文件的旧版本数据", filenames.size());
-        for (String filename : filenames) {
-            try {
-                // 注意：Spring AI VectorStore 的 delete API 可能需要根据具体实现调整
-                // 目前先只更新哈希值，让旧数据在下次查询时自然过期
-                versionTracker.removeDocumentsBySourceFile(filename);
-                //TODO 从vector_store表中删除
-                jdbcTemplate.update("DELETE FROM vector_store WHERE metadata->>'filename' = ?", filename);
-                logger.info("已标记删除文档: {}（物理删除需手动执行）", filename);
-            } catch (Exception e) {
-                logger.error("处理删除文档失败: {}", filename, e);
-            }
+    private void deleteDocument(String existingId) {
+        try {
+            jdbcTemplate.update("DELETE FROM vector_store WHERE metadata->>'stable_id' = ?", existingId);
+            versionTracker.removeDocument(existingId);
+            logger.info("已删除过时Document文档: {}", existingId);
+        } catch (Exception e) {
+            logger.warn("删除过时文档 {} 失败: {}", existingId, e.getMessage());
         }
     }
 
@@ -185,33 +204,6 @@ public class PgVectorStoreConfig {
             List<Document> allDocuments = info.getDocuments();
             
             logger.info("正在处理文件: {}/{}", sourceFile, allDocuments.size());
-            
-            // 收集该文件vector_store所有已存在的stable_id
-            Set<String> existingDocIds = jdbcTemplate.queryForList(
-                "SELECT metadata->>'stable_id' FROM vector_store WHERE metadata->>'source_file' = ?",
-                String.class, sourceFile
-            ).stream().filter(id -> id != null).collect(java.util.stream.Collectors.toSet());
-            
-            // 收集当前md文件的所有stable_id
-            Set<String> currentDocIds = new HashSet<>();
-            for (int i = 0; i < allDocuments.size(); i++) {
-                Document doc = allDocuments.get(i);
-                String stableId = (String) doc.getMetadata().get("stable_id");
-                currentDocIds.add(stableId);
-            }
-            
-            // 删除不再存在的文档（例如文件中的某些段落被删除）
-            for (String existingId : existingDocIds) {
-                if (!currentDocIds.contains(existingId)) {
-                    try {
-                        jdbcTemplate.update("DELETE FROM vector_store WHERE metadata->>'stable_id' = ?", existingId);
-                        versionTracker.removeDocument(existingId);
-                        logger.info("已删除过时文档: {}", existingId);
-                    } catch (Exception e) {
-                        logger.warn("删除过时文档 {} 失败: {}", existingId, e.getMessage());
-                    }
-                }
-            }
             
             // 逐个处理文档
             for (int docIdx = 0; docIdx < allDocuments.size(); docIdx++) {

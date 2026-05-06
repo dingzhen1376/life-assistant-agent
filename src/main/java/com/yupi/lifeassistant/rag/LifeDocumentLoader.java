@@ -87,7 +87,6 @@ public class LifeDocumentLoader {
 
         public DocumentInfo(List<Document> documents, String filename) {
             this.documents = documents;
-            //this.contentHash = contentHash;
             this.filename = filename;
         }
 
