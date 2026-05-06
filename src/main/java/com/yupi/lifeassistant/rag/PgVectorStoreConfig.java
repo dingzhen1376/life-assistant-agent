@@ -5,19 +5,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingModel;
-import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.ai.vectorstore.pgvector.PgVectorStore;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
 
 import static org.springframework.ai.vectorstore.pgvector.PgVectorStore.PgDistanceType.COSINE_DISTANCE;
 import static org.springframework.ai.vectorstore.pgvector.PgVectorStore.PgIndexType.HNSW;
+
 @Configuration
 public class PgVectorStoreConfig {
     private static final Logger logger = LoggerFactory.getLogger(PgVectorStoreConfig.class);
@@ -71,48 +72,54 @@ public class PgVectorStoreConfig {
                 logger.warn("没有加载到任何文档，跳过向量库初始化");
                 return vectorStore;
             }
-
-            // 获取已处理的文件列表
-            Set<String> processedFiles = versionTracker.getProcessedFiles();
             
             List<LifeDocumentLoader.DocumentInfo> toProcess = new ArrayList<>();
-            List<String> toDelete = new ArrayList<>();
 
             // 检测新增和修改的文件
             for (Map.Entry<String, LifeDocumentLoader.DocumentInfo> entry : currentFiles.entrySet()) {
                 String filename = entry.getKey();
                 LifeDocumentLoader.DocumentInfo info = entry.getValue();
-                String storedHash = versionTracker.getFileHash(filename);
+                
+                // 检查该文件是否有变化（只要有一个文档变化就需要处理）
+                boolean fileChanged = false;
+                for (Document doc : info.getDocuments()) {
+                    String stableId = (String) doc.getMetadata().get("stable_id");
+                    String storedHash = versionTracker.getDocumentHash(stableId);
+                    String currentHash = calculateDocumentHash(doc);
 
-                if (storedHash == null) {
-                    logger.info("检测到新文件: {}", filename);
-                    toProcess.add(info);
-                } else if (!storedHash.equals(info.getContentHash())) {
+                    //对应的文档ID不存在，则说明是新增的文档，不想等就是更新了文档
+                    if (storedHash == null || !storedHash.equals(currentHash)) {
+                        fileChanged = true;
+                        break;
+                    }
+                }
+                
+                if (fileChanged) {
                     logger.info("检测到文件变更: {}", filename);
                     toProcess.add(info);
-                    toDelete.add(filename); // 先删除旧版本
+                } else {
+                    logger.debug("文件未变化: {}", filename);
                 }
             }
 
-            // 检测已删除的文件
-            for (String processedFile : processedFiles) {
-                if (!currentFiles.containsKey(processedFile)) {
-                    logger.info("检测到文件删除: {}", processedFile);
-                    toDelete.add(processedFile);
+            // 检测已删除的md文件
+            Set<String> currentSourceFiles = currentFiles.keySet();
+            Set<String> trackedSourceFiles = versionTracker.getSourceFiles();
+            for (String trackedFile : trackedSourceFiles) {
+                if (!currentSourceFiles.contains(trackedFile)) {
+                    logger.info("检测到文件删除: {}", trackedFile);
+                    // 删除该文件对应的所有文档记录
+                    jdbcTemplate.update("DELETE FROM vector_store WHERE metadata->>'filename' = ?", trackedFile);
+                    versionTracker.removeDocumentsBySourceFile(trackedFile);
                 }
             }
 
-            if (toDelete.isEmpty() && toProcess.isEmpty()) {
+            if (toProcess.isEmpty()) {
                 logger.info("所有文档均为最新状态，无需更新");
                 return vectorStore;
             }
 
-            logger.info("需要更新 {} 个文档，删除 {} 个文档", toProcess.size(), toDelete.size());
-
-            // 执行删除操作
-            if (!toDelete.isEmpty()) {
-                deleteDocuments(vectorStore, toDelete);
-            }
+            logger.info("需要更新 {} 个文件", toProcess.size());
 
             // 处理并添加新/更新的文档
             if (!toProcess.isEmpty()) {
@@ -136,7 +143,6 @@ public class PgVectorStoreConfig {
      */
     private void clearVectorStore(PgVectorStore vectorStore) {
         logger.warn("注意：当前版本暂不支持清空操作，请手动清空 vector_store 表");
-        // TODO: 根据实际 API 实现清空逻辑
         jdbcTemplate.update("DELETE FROM vector_store");
     }
 
@@ -149,9 +155,9 @@ public class PgVectorStoreConfig {
             try {
                 // 注意：Spring AI VectorStore 的 delete API 可能需要根据具体实现调整
                 // 目前先只更新哈希值，让旧数据在下次查询时自然过期
-                versionTracker.removeFile(filename);
+                versionTracker.removeDocumentsBySourceFile(filename);
                 //TODO 从vector_store表中删除
-                jdbcTemplate.update("DELETE FROM vector_store WHERE filename = ?", filename);
+                jdbcTemplate.update("DELETE FROM vector_store WHERE metadata->>'filename' = ?", filename);
                 logger.info("已标记删除文档: {}（物理删除需手动执行）", filename);
             } catch (Exception e) {
                 logger.error("处理删除文档失败: {}", filename, e);
@@ -160,71 +166,150 @@ public class PgVectorStoreConfig {
     }
 
     /**
-     * 处理并添加文档到向量库
+     * 处理并添加文档到向量库 - 基于单个Document的增量更新
      */
     private void processAndAddDocuments(PgVectorStore vectorStore, List<LifeDocumentLoader.DocumentInfo> infos) throws InterruptedException {
-        int enrichBatchSize = 2; // 减小批次，避免触发限流
-        List<Document> allTransformedDocuments = new ArrayList<>();
+        int totalDocs = 0;
+        int processedDocs = 0;
+        int skippedDocs = 0;
         
-        for (int i = 0; i < infos.size(); i += enrichBatchSize) {
-            int end = Math.min(i + enrichBatchSize, infos.size());
-            List<LifeDocumentLoader.DocumentInfo> batch = infos.subList(i, end);
+        // 统计Document总文档数
+        for (LifeDocumentLoader.DocumentInfo info : infos) {
+            totalDocs += info.getDocuments().size();
+        }
+        
+        logger.info("开始处理 {} 个md文件，共 {} 个Document文档", infos.size(), totalDocs);
+        
+        for (LifeDocumentLoader.DocumentInfo info : infos) {
+            String sourceFile = info.getFilename();
+            List<Document> allDocuments = info.getDocuments();
             
-            logger.info("正在 enrich 第 {}/{} 批文档...", (i / enrichBatchSize + 1), 
-                (infos.size() + enrichBatchSize - 1) / enrichBatchSize);
+            logger.info("正在处理文件: {}/{}", sourceFile, allDocuments.size());
             
-            for (LifeDocumentLoader.DocumentInfo info : batch) {
+            // 收集该文件vector_store所有已存在的stable_id
+            Set<String> existingDocIds = jdbcTemplate.queryForList(
+                "SELECT metadata->>'stable_id' FROM vector_store WHERE metadata->>'source_file' = ?",
+                String.class, sourceFile
+            ).stream().filter(id -> id != null).collect(java.util.stream.Collectors.toSet());
+            
+            // 收集当前md文件的所有stable_id
+            Set<String> currentDocIds = new HashSet<>();
+            for (int i = 0; i < allDocuments.size(); i++) {
+                Document doc = allDocuments.get(i);
+                String stableId = (String) doc.getMetadata().get("stable_id");
+                currentDocIds.add(stableId);
+            }
+            
+            // 删除不再存在的文档（例如文件中的某些段落被删除）
+            for (String existingId : existingDocIds) {
+                if (!currentDocIds.contains(existingId)) {
+                    try {
+                        jdbcTemplate.update("DELETE FROM vector_store WHERE metadata->>'stable_id' = ?", existingId);
+                        versionTracker.removeDocument(existingId);
+                        logger.info("已删除过时文档: {}", existingId);
+                    } catch (Exception e) {
+                        logger.warn("删除过时文档 {} 失败: {}", existingId, e.getMessage());
+                    }
+                }
+            }
+            
+            // 逐个处理文档
+            for (int docIdx = 0; docIdx < allDocuments.size(); docIdx++) {
+                Document doc = allDocuments.get(docIdx);
+                // 使用稳定的ID而不是UUID
+                String stableId = (String) doc.getMetadata().get("stable_id");
+                String currentHash = calculateDocumentHash(doc);
+                String storedHash = versionTracker.getDocumentHash(stableId);
+                
+                // 如果文档未变化，跳过
+                if (storedHash != null && storedHash.equals(currentHash)) {
+                    logger.debug("✓ 文档 {}/{} 未变化，跳过", docIdx + 1, allDocuments.size());
+                    skippedDocs++;
+                    continue;
+                }
+                
+                // 如果文档已存在但内容变化，先删除旧版本
+                if (storedHash != null) {
+                    try {
+                        jdbcTemplate.update("DELETE FROM vector_store WHERE metadata->>'stable_id' = ?", stableId);
+                    } catch (Exception e) {
+                        logger.warn("删除旧版本文档 {} 失败: {}", stableId, e.getMessage());
+                    }
+                }
+                
+                // Enrich 单个文档
                 boolean success = false;
                 int maxRetries = 3;
                 int retryCount = 0;
                 
                 while (!success && retryCount < maxRetries) {
                     try {
-                        List<Document> transformed = lifeDocumentTransformer.enrichDocuments(info.getDocuments());
-                        allTransformedDocuments.addAll(transformed);
-                        logger.info("✓ 已处理文件: {}", info.getFilename());
+                        List<Document> enrichedDocs = lifeDocumentTransformer.enrichDocuments(List.of(doc));
+                        
+                        // 设置稳定的ID到enriched文档（确保每个文档都有）
+                        for (Document enrichedDoc : enrichedDocs) {
+                            enrichedDoc.getMetadata().put("stable_id", stableId);
+                            enrichedDoc.getMetadata().put("source_file", sourceFile);
+                            enrichedDoc.getMetadata().put("doc_index", docIdx);
+                        }
+                        
+                        // 添加到向量库
+                        vectorStore.add(enrichedDocs);
+                        
+                        // 更新版本追踪
+                        versionTracker.updateDocumentHash(stableId, sourceFile, currentHash);
+                        
+                        logger.info("✓ 已处理文档 {}/{} from {} ({}/{})", 
+                            docIdx + 1, allDocuments.size(), sourceFile, 
+                            processedDocs + 1, totalDocs);
+                        processedDocs++;
                         success = true;
                     } catch (Exception e) {
                         retryCount++;
                         if (e.getMessage().contains("429") || e.getMessage().contains("Throttling")) {
-                            long waitTime = retryCount * 5000; // 递增等待时间：5s, 10s, 15s
+                            long waitTime = retryCount * 5000;
                             logger.warn("⚠ 检测到速率限制，第 {} 次重试，等待 {} 秒...", retryCount, waitTime / 1000);
                             Thread.sleep(waitTime);
                         } else {
-                            logger.error("✗ 处理文件 {} 失败: {}", info.getFilename(), e.getMessage());
+                            logger.error("✗ 处理文档 {} 失败: {}", stableId, e.getMessage());
                             break;
                         }
                     }
                 }
                 
                 if (!success) {
-                    logger.error("✗ 文件 {} 经过 {} 次重试仍然失败，跳过", info.getFilename(), maxRetries);
+                    logger.error("✗ 文档 {} 经过 {} 次重试仍然失败，跳过", stableId, maxRetries);
                 }
                 
-                // 每个文件处理后都等待一下
-                Thread.sleep(3000);
+                // 每个文档处理后等待一下，避免触发限流
+                if (success) {
+                    Thread.sleep(3000);
+                }
             }
-            
-            if (end < infos.size()) {
-                logger.info("等待 5 秒后继续下一批...");
-                Thread.sleep(5000);
-            }
-        }
-
-        logger.info("Enrich 完成，开始插入向量库...");
-        int batchSize = 10;
-        for (int i = 0; i < allTransformedDocuments.size(); i += batchSize) {
-            int endIndex = Math.min(i + batchSize, allTransformedDocuments.size());
-            vectorStore.add(allTransformedDocuments.subList(i, endIndex));
-            logger.info("已插入 {}/{} 条文档", endIndex, allTransformedDocuments.size());
-        }
-
-        // 更新版本追踪信息
-        for (LifeDocumentLoader.DocumentInfo info : infos) {
-            versionTracker.updateFileHash(info.getFilename(), info.getContentHash());
         }
         
-        logger.info("向量库初始化完成，共插入 {} 条文档", allTransformedDocuments.size());
+        logger.info("向量库初始化完成 - 总计: {}, 新增/更新: {}, 跳过: {}", 
+            totalDocs, processedDocs, skippedDocs);
+    }
+
+    /**
+     * 计算单个文档的哈希值
+     */
+    private String calculateDocumentHash(Document doc) {
+        try {
+            String content = doc.getText();
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hashBytes = md.digest(content.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hashBytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("计算文档哈希失败", e);
+        }
     }
 
 }
+
+

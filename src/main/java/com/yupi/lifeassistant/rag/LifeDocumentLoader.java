@@ -9,10 +9,6 @@ import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,14 +22,6 @@ public class LifeDocumentLoader {
         this.resourcePatternResolver = resourcePatternResolver;
     }
 
-    //加载多篇markdown文档
-    public List<Document> loadMarkdowns() {
-        Map<String, DocumentInfo> documentMap = loadMarkdownsWithHash();
-        return documentMap.values().stream()
-                .flatMap(info -> info.getDocuments().stream())
-                .toList();
-    }
-
     /**
      * 加载文档并返回包含哈希值的信息
      */
@@ -43,29 +31,33 @@ public class LifeDocumentLoader {
             Resource[] resources = resourcePatternResolver.getResources("classpath:document/*.md");
             for (Resource resource : resources) {
                 String fileName = resource.getFilename();
-                if (fileName == null) continue;
-
                 String category = fileName.substring(fileName.length() - 6, fileName.length() - 4);
-                
-                byte[] content;
-                try {
-                    content = resource.getContentAsByteArray();
-                } catch (Exception e) {
-                    log.warn("无法读取文件内容: {}", fileName, e);
+                if (fileName == null) {
                     continue;
                 }
-                String contentHash = calculateHash(content);
+
                 
                 MarkdownDocumentReaderConfig config = MarkdownDocumentReaderConfig.builder()
                         .withHorizontalRuleCreateDocument(true)
                         .withIncludeCodeBlock(false)
                         .withIncludeBlockquote(false)
                         .withAdditionalMetadata("filename", fileName)
+                        .withAdditionalMetadata("category", category)
                         .build();
                 MarkdownDocumentReader reader = new MarkdownDocumentReader(resource, config);
                 List<Document> documents = reader.get();
                 
-                DocumentInfo info = new DocumentInfo(documents, contentHash, fileName);
+                // 为每个Document生成稳定的ID（基于文件名+索引，不包含内容哈希）
+                for (int i = 0; i < documents.size(); i++) {
+                    Document doc = documents.get(i);
+                    String stableId = generateStableId(fileName, i);
+                    // 将稳定的ID设置到Document的metadata中
+                    doc.getMetadata().put("stable_id", stableId);
+                    doc.getMetadata().put("source_file", fileName);
+                    doc.getMetadata().put("doc_index", i);
+                }
+                
+                DocumentInfo info = new DocumentInfo(documents, fileName);
                 documentMap.put(fileName, info);
             }
             log.info("读取完的文档内容，共 {} 个文件", documentMap.size());
@@ -76,20 +68,14 @@ public class LifeDocumentLoader {
     }
 
     /**
-     * 计算内容的 SHA-256 哈希值
+     * 为Document生成稳定的ID（基于文件名+索引，不包含内容哈希）
+     * 格式: filename_docIndex
+     * 这样即使内容变化，ID也保持不变
      */
-    private String calculateHash(byte[] content) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hashBytes = md.digest(content);
-            StringBuilder sb = new StringBuilder();
-            for (byte b : hashBytes) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("不支持的哈希算法", e);
-        }
+    private String generateStableId(String filename, int docIndex) {
+        // 移除文件扩展名
+        String baseName = filename.replaceAll("\\.[^.]+$", "");
+        return String.format("%s_%d", baseName, docIndex);
     }
 
     /**
@@ -97,21 +83,16 @@ public class LifeDocumentLoader {
      */
     public static class DocumentInfo {
         private final List<Document> documents;
-        private final String contentHash;
         private final String filename;
 
-        public DocumentInfo(List<Document> documents, String contentHash, String filename) {
+        public DocumentInfo(List<Document> documents, String filename) {
             this.documents = documents;
-            this.contentHash = contentHash;
+            //this.contentHash = contentHash;
             this.filename = filename;
         }
 
         public List<Document> getDocuments() {
             return documents;
-        }
-
-        public String getContentHash() {
-            return contentHash;
         }
 
         public String getFilename() {
