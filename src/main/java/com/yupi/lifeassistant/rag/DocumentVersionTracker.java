@@ -91,16 +91,6 @@ public class DocumentVersionTracker {
     }
 
     /**
-     * 获取所有已追踪的文档ID列表
-     */
-    public List<String> getAllTrackedDocumentIds() {
-        return jdbcTemplate.queryForList("SELECT id FROM document_version", String.class)
-                .stream()
-                .filter(Objects::nonNull)
-                .toList();
-    }
-
-    /**
      * 获取所有已处理的源文件列表
      */
     public Set<String> getSourceFiles() {
