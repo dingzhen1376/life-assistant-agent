@@ -51,4 +51,5 @@ knife4j:
 life-assistant:
   workspace: ${LIFE_ASSISTANT_WORKSPACE:D:/codex/life-assistant-agent/tmp}
   vectorstore:
-    auto-init: false
+    auto-init: true # 启用自动同步（推荐常驻）
+    force-reinit: false # 默认false，需要全量重刷时临时改为true
