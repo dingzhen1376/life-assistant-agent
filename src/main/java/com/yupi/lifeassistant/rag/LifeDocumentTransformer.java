@@ -11,12 +11,13 @@ import java.util.List;
 //keywordEnrich
 public class LifeDocumentTransformer {
     private final ChatModel chatModel;
+
     public LifeDocumentTransformer(ChatModel dashscopeChatModel) {
         this.chatModel = dashscopeChatModel;
     }
     List<Document> enrichDocuments(List<Document> documents) {
         KeywordMetadataEnricher enricher = KeywordMetadataEnricher.builder(chatModel)
-                .keywordCount(3)
+                .keywordCount(2)
                 .build();
 
         return enricher.apply(documents);

@@ -16,10 +16,9 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class LifeManusAgent extends ToolCallAgent {
-    @Resource
-    private VectorStore pgVectorStore;
 
-    public LifeManusAgent(ToolCallback[] allTools, ChatModel dashscopeChatModel, StringRedisTemplate stringRedisTemplate) {
+    public LifeManusAgent(ToolCallback[] allTools, ChatModel dashscopeChatModel, StringRedisTemplate stringRedisTemplate,
+                            VectorStore pgVectorStore) {
         super(allTools);
         this.setName("LifeManus");
         this.setSystemPrompt("""

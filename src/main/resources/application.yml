@@ -50,3 +50,5 @@ knife4j:
 
 life-assistant:
   workspace: ${LIFE_ASSISTANT_WORKSPACE:D:/codex/life-assistant-agent/tmp}
+  vectorstore:
+    auto-init: false
