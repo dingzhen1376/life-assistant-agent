@@ -139,6 +139,7 @@ public abstract class BaseAgent {
 
     public abstract String step();
 
+    private ChatMemoryCompressAgent chatMemoryCompressAgent;
     protected void cleanup() {
         cleanupIntermediateToolMessagesIfNecessary();
         this.currentStep = 0;
@@ -146,6 +147,7 @@ public abstract class BaseAgent {
         this.chatId = null;
         this.cleanupExecuted = false;
         this.messageList = new ArrayList<>();
+        chatMemoryCompressAgent.compress(chatId);
     }
 
     private void cleanupIntermediateToolMessagesIfNecessary() {
