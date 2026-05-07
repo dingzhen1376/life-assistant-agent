@@ -5,6 +5,7 @@ import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
 import jakarta.annotation.Resource;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
@@ -18,7 +19,7 @@ import org.springframework.stereotype.Component;
 public class LifeManusAgent extends ToolCallAgent {
 
     public LifeManusAgent(ToolCallback[] allTools, ChatModel dashscopeChatModel, StringRedisTemplate stringRedisTemplate,
-                            VectorStore pgVectorStore) {
+                          Advisor myRedisVectorStoreAdvisor) {
         super(allTools);
         this.setName("LifeManus");
         this.setSystemPrompt("""
@@ -57,7 +58,7 @@ public class LifeManusAgent extends ToolCallAgent {
         this.setChatClient(ChatClient.builder(dashscopeChatModel)
                 .defaultAdvisors(new MyLoggerAdvisor())
                 .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
-                .defaultAdvisors(QuestionAnswerAdvisor.builder(pgVectorStore).build())
+                .defaultAdvisors(myRedisVectorStoreAdvisor)
                 .build());
     }
 }

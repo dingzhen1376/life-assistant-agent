@@ -112,7 +112,7 @@ public class PgVectorStoreConfig {
                     String storedHash = versionTracker.getDocumentHash(stableId);
                     String currentHash = calculateDocumentHash(doc);
 
-                    //对应的文档ID不存在，则说明是新增的文档，不想等就是更新了文档
+                    //对应的文档ID不存在，则说明是新增的文档，不相等就是更新了文档
                     if (storedHash == null || !storedHash.equals(currentHash)) {
                         fileChanged = true;
                         break;
