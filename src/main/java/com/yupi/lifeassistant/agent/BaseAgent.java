@@ -3,6 +3,7 @@ package com.yupi.lifeassistant.agent;
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.agent.model.AgentState;
 import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
+import com.yupi.lifeassistant.memory.LifeMemoryService;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -28,15 +29,18 @@ public abstract class BaseAgent {
     private int maxSteps = 10;
     private ChatClient chatClient;
     private RedisChatMemoryRepository redisChatMemoryRepository;
-    //Redis中是否清除工具调用结果的Assistant消息，默认为true清除
+    private LifeMemoryService lifeMemoryService;
     private boolean cleanIntermediateToolMessages = true;
     private boolean cleanupExecuted = false;
     private String chatId;
     private List<Message> messageList = new ArrayList<>();
+    private ChatMemoryCompressAgent chatMemoryCompressAgent;
 
     public String run(String userPrompt, String chatId) {
         validateBeforeRun(userPrompt);
         this.chatId = normalizeChatId(chatId);
+        // 绑定当前会话，供 LifeMemoryTool 在工具调用时自动定位记忆命名空间。
+        AgentRunContext.setChatId(this.chatId);
         this.state = AgentState.RUNNING;
         this.messageList.add(new UserMessage(userPrompt));
         try {
@@ -81,6 +85,8 @@ public abstract class BaseAgent {
         try {
             validateBeforeRun(userPrompt);
             this.chatId = normalizeChatId(chatId);
+            // SSE 异步线程里也要重新绑定 chatId，否则工具调用拿不到当前会话。
+            AgentRunContext.setChatId(this.chatId);
             this.state = AgentState.RUNNING;
             this.messageList.add(new UserMessage(userPrompt));
             for (int i = 0; i < maxSteps && state != AgentState.FINISHED; i++) {
@@ -133,21 +139,36 @@ public abstract class BaseAgent {
         return "任务已完成。";
     }
 
+    protected String getSystemPromptWithMemory() {
+        if (lifeMemoryService == null || StrUtil.isBlank(chatId)) {
+            return systemPrompt;
+        }
+        // Core Memory 每轮都进入 system prompt，这是 Letta memory blocks 的主要入口。
+        return systemPrompt + "\n\n" + lifeMemoryService.renderCoreMemory(chatId);
+    }
+
     protected String getFinalAssistantPrompt() {
         return "";
     }
 
     public abstract String step();
 
-    private ChatMemoryCompressAgent chatMemoryCompressAgent;
     protected void cleanup() {
-        cleanupIntermediateToolMessagesIfNecessary();
-        this.currentStep = 0;
-        this.state = AgentState.IDLE;
-        this.chatId = null;
-        this.cleanupExecuted = false;
-        this.messageList = new ArrayList<>();
-        chatMemoryCompressAgent.compress(chatId);
+        String conversationId = this.chatId;
+        try {
+            cleanupIntermediateToolMessagesIfNecessary();
+            if (chatMemoryCompressAgent != null && StrUtil.isNotBlank(conversationId)) {
+                // 本轮结束后再压缩一次，把刚写入 Redis 的最终 Assistant 也纳入队列管理。
+                chatMemoryCompressAgent.compress(conversationId);
+            }
+        } finally {
+            this.currentStep = 0;
+            this.state = AgentState.IDLE;
+            this.chatId = null;
+            this.cleanupExecuted = false;
+            this.messageList = new ArrayList<>();
+            AgentRunContext.clear();
+        }
     }
 
     private void cleanupIntermediateToolMessagesIfNecessary() {

@@ -49,7 +49,7 @@ public class ToolCallAgent extends ReActAgent {
         Prompt prompt = new Prompt(getMessageList(), chatOptions);
         try {
             ChatResponse chatResponse = getChatClient().prompt(prompt)
-                    .system(getSystemPrompt())
+                    .system(getSystemPromptWithMemory())
                     .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, getChatId()))
                     .toolCallbacks(availableTools)
                     .call()
@@ -81,15 +81,6 @@ public class ToolCallAgent extends ReActAgent {
     }
 
     @Override
-    public String step() {
-        boolean shouldAct = think();
-        if (!shouldAct) {
-            return StrUtil.blankToDefault(finalResponse, "Thinking complete. No tool action is required.");
-        }
-        return act();
-    }
-
-    @Override
     public String act() {
         if (toolCallChatResponse == null || !toolCallChatResponse.hasToolCalls()) {
             return "No tool call is required.";
@@ -97,7 +88,8 @@ public class ToolCallAgent extends ReActAgent {
         Prompt prompt = new Prompt(getMessageList(), chatOptions);
         ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, toolCallChatResponse);
         setMessageList(toolExecutionResult.conversationHistory());
-        ToolResponseMessage toolResponseMessage = (ToolResponseMessage) CollUtil.getLast(toolExecutionResult.conversationHistory());
+        ToolResponseMessage toolResponseMessage =
+                (ToolResponseMessage) CollUtil.getLast(toolExecutionResult.conversationHistory());
 
         boolean terminated = toolResponseMessage.getResponses().stream()
                 .anyMatch(response -> "doTerminate".equals(response.name()));
@@ -131,5 +123,4 @@ public class ToolCallAgent extends ReActAgent {
         }
         return "";
     }
-    
 }
