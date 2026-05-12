@@ -201,12 +201,12 @@ delegation_results
 
 用于保存 supervisor 和 worker 都应该知道的信息，例如任务状态、全局偏好、委派结果。
 
-### Private Core Memory
+### Agent Core Memory
 
-每个 Agent 自己的长期稳定记忆：
+每个 Agent 自己的长期稳定记忆。它不再按单次 `chatId` 隔离，而是按 `agentId` 共享，所以同一个 Agent 在不同对话中会看到同一份 core memory：
 
 ```text
-life:memory:core:{agentId}:{chatId}
+life:memory:core:{agentId}
 ```
 
 默认 blocks：
@@ -480,7 +480,7 @@ life-assistant-agent
 - worker 结果既作为 tool result 返回给 supervisor，也写入 shared memory。
 - Redis 保留完整对话历史，进入模型上下文的是 FIFO active window + compressed summary。
 - PGVector 分成 RAG 知识库和 archival memory 两张表，避免职责混杂。
-- 前端只负责 chatId、SSE 展示和本地 thread 状态，核心 Agent 状态在后端。
+- 前端只负责 chatId、SSE 展示和本地 thread 状态；core memory 是 Agent 级长期状态，不随单个对话删除。
 
 后续如果要继续增强，可以考虑：
 

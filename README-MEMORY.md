@@ -18,7 +18,7 @@ src/main/java/com/yupi/lifeassistant/controller/LifeAssistantController.java
 - 保证每次请求都有 `chatId`。
 - 把 `message + chatId` 传给 `LifeAssistantApp`。
 
-这里要关注的是：同一个对话必须使用同一个 `chatId`，因为 Redis 对话记忆、Core Memory、FIFO 压缩摘要都以 `chatId` 作为隔离维度。
+这里要关注的是：同一个对话必须使用同一个 `chatId`，因为 Redis 对话记忆、shared memory 和 FIFO 压缩摘要都以 `chatId` 作为对话隔离维度。Core Memory 现在按 `agentId` 隔离，用于保存同一个 Agent 跨对话复用的长期记忆。
 
 ### `LifeAssistantApp`
 
@@ -290,7 +290,7 @@ src/main/java/com/yupi/lifeassistant/memory/LifeMemoryService.java
 Redis Hash：
 
 ```text
-life:memory:core:{chatId}
+life:memory:core:{agentId}
 ```
 
 默认 block：
@@ -302,7 +302,7 @@ preferences
 working
 ```
 
-Core Memory 每轮都会进入 system prompt。
+Core Memory 每轮都会进入 system prompt，并且不随单次对话切换；例如 `life-planner` 的 core memory 会在该 Agent 的所有对话中复用。
 
 ### 6.2 Recall Memory
 
@@ -453,7 +453,7 @@ chat:memory:{chatId}
 完整对话历史，供 RedisChatMemoryRepository 使用。
 
 ```text
-life:memory:core:{chatId}
+life:memory:core:{agentId}
 ```
 
 Core Memory，始终进入 system prompt。
@@ -487,7 +487,7 @@ PGVector 中的长期向量记忆表。
 | Queue Manager | `ContextQueueManager.buildContext()` |
 | Context Compression | `ChatMemoryCompressAgent.compress()` |
 | Memory Tools | `LifeMemoryTool` |
-| Per-agent state isolation | `chatId` + Redis key namespace |
+| Per-agent state isolation | `agentId` for Core Memory, `agentId:chatId` for recall/FIFO context |
 
 ## 13. 阅读顺序总结
 

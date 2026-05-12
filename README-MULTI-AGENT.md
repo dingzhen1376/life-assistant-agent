@@ -236,11 +236,11 @@ life-planner:abc
 life-researcher:abc
 ```
 
-这样每个 Agent 有自己的 private memory：
+这样每个 Agent 有自己的对话历史和 FIFO 压缩状态；core memory 则是 Agent 级长期记忆，不随 chatId 变化：
 
 ```text
 chat:memory:life-planner:abc
-life:memory:core:life-planner:abc
+life:memory:core:life-planner
 life:memory:queue:summary:life-planner:abc
 life:memory:queue:compressed-count:life-planner:abc
 ```
@@ -408,7 +408,7 @@ GET /ai/life/chat/sse?message=查资料并形成计划&chatId=abc&agentId=life-c
 | Agent-to-Agent message | `delegateToAgent(...)` |
 | Tag-based routing | `delegateToAgentsByTags(...)` |
 | Shared memory blocks | `life:memory:shared:{rootChatId}` |
-| Private memory blocks | `life:memory:core:{agentId}:{chatId}` |
+| Private memory blocks | `life:memory:core:{agentId}` |
 | Recall memory | `chat:memory:{agentId}:{chatId}` |
 | Context compression | `ChatMemoryCompressAgent` |
 

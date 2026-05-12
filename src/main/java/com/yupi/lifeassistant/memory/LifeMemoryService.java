@@ -354,7 +354,6 @@ public class LifeMemoryService {
         List<String> redisKeys = new ArrayList<>();
         redisKeys.add(getSharedMemoryKey(normalizedRootChatId));
         for (String conversationId : idsToDelete) {
-            redisKeys.add(getCoreMemoryKey(conversationId));
             redisKeys.add(QUEUE_SUMMARY_KEY_PREFIX + conversationId);
             redisKeys.add(QUEUE_COMPRESSED_COUNT_KEY_PREFIX + conversationId);
         }
@@ -415,8 +414,23 @@ public class LifeMemoryService {
                 "No delegation results have been recorded yet.");
     }
 
-    private static String getCoreMemoryKey(String chatId) {
-        return CORE_MEMORY_KEY_PREFIX + chatId;
+    private static String getCoreMemoryKey(String conversationId) {
+        return CORE_MEMORY_KEY_PREFIX + extractAgentMemoryScope(conversationId);
+    }
+
+    /**
+     * Core memory 是 Agent 级长期记忆，不再按单次对话隔离。
+     *
+     * <p>当前 conversationId 形如 agentId:rootChatId。这里仅取 agentId，
+     * 因此 life-planner 在不同 chatId 下会共享同一份 core memory。
+     * 项目目前没有 userId 维度；如果后续支持多用户，应扩展为 userId:agentId。
+     */
+    private static String extractAgentMemoryScope(String conversationId) {
+        int separatorIndex = conversationId.indexOf(':');
+        if (separatorIndex <= 0) {
+            return conversationId;
+        }
+        return conversationId.substring(0, separatorIndex);
     }
 
     /**
