@@ -374,13 +374,13 @@ public class LifeMemoryService {
         String key = getCoreMemoryKey(chatId);
         //当这些block为空的时候才会初始化
         stringRedisTemplate.opsForHash().putIfAbsent(key, "persona",
-                "The active agent persona is defined by the selected AgentProfile system prompt.");
+                "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "human",
-                "No stable user profile has been confirmed yet.");
+                "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "preferences",
-                "No long-term user preferences have been confirmed yet.");
+                "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "working",
-                "No active long-running plan is stored.");
+                "");
     }
 
     private int deleteArchivalMemoryRows(Set<String> conversationIds) {
@@ -403,15 +403,15 @@ public class LifeMemoryService {
         String key = getSharedMemoryKey(conversationId);
         // shared blocks 模拟 Letta 的共享 Memory Blocks，是 supervisor-worker 协作的公共白板。
         stringRedisTemplate.opsForHash().putIfAbsent(key, "user_profile",
-                "No shared user profile has been confirmed yet.");
+                "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "global_preferences",
-                "No shared global preferences have been confirmed yet.");
+                "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "team_context",
-                "No shared multi-agent task context is stored.");
+                "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "task_board",
-                "No shared task board is active.");
+                "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "delegation_results",
-                "No delegation results have been recorded yet.");
+                "");
     }
 
     private static String getCoreMemoryKey(String conversationId) {
