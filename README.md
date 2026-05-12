@@ -1,43 +1,49 @@
-# Life Assistant Agent 后端说明
+# Life Assistant Agent
 
-`life-assistant-agent` 是一个基于 Java 的生活助手 Agent 后端项目，核心技术栈是 Spring Boot、Spring AI、DashScope、Redis、PostgreSQL PGVector。项目风格参考 OpenManus 的 ReAct + Tool Calling 工作流，并在上下文记忆部分引入了 Letta / MemGPT 风格的分层记忆与 FIFO 压缩机制。
+`life-assistant-agent` 是一个基于 Java 的超级生活助手 Agent 项目。后端使用 Spring Boot、Spring AI、DashScope、Redis、PostgreSQL PGVector，整体执行风格参考 OpenManus 的 ReAct + Tool Calling，并在记忆管理和多 Agent 协作上借鉴 Letta / MemGPT。
 
-本文重点说明当前后端代码中用到的模块、技术和运行链路。更详细的记忆管理阅读顺序见 [README-MEMORY.md](README-MEMORY.md)。
+项目当前包含：
+
+- 后端 Agent 服务：`src/main/java/com/yupi/lifeassistant`
+- 静态前端页面：`frontend`
+- Nginx 本地代理配置：`frontend/nginx.conf`、`frontend/start-nginx.ps1`
+- 生活知识 RAG 文档：`src/main/resources/document`
+- 记忆管理说明：`README-MEMORY.md`
+- 多 Agent 说明：`README-MULTI-AGENT.md`
 
 ## 技术栈
 
-后端主要使用：
-
 | 模块 | 技术 |
 | --- | --- |
-| Web 框架 | Spring Boot 3.5.x |
+| Web 框架 | Spring Boot 3.5.11 |
+| Java 版本 | Java 21 |
 | Agent / LLM 编排 | Spring AI |
-| 大模型 | DashScope `qwen-plus-2025-07-28` |
-| Embedding | DashScope Embedding |
+| 模型服务 | DashScope |
+| 当前聊天模型 | `qwen-plus-2025-07-28` |
 | 对话记忆 | Redis + 自定义 `RedisChatMemoryRepository` |
-| 长期向量记忆 | PostgreSQL + PGVector |
-| RAG 知识库 | Spring AI PGVector Store |
+| RAG 向量库 | PostgreSQL + PGVector |
+| 长期向量记忆 | 独立 PGVector 表 `life_archival_memory` |
+| Markdown 文档读取 | `spring-ai-markdown-document-reader` |
 | 工具调用 | Spring AI Tool Calling |
 | API 文档 | springdoc-openapi + Knife4j |
-| 前端代理 | nginx 静态页面 + `/api` 反向代理 |
+| 前端 | 原生 HTML / CSS / JavaScript |
+| 本地代理 | Nginx，默认监听 `8080` |
 
-## 后端整体架构
-
-后端核心链路如下：
+## 总体架构
 
 ```text
-前端 / API 请求
-  -> LifeAssistantController
+Frontend / API Client
+  -> Nginx /api proxy
+  -> Spring Boot Controller
   -> LifeAssistantApp
-  -> LifeManusAgent
-  -> BaseAgent ReAct Loop
-  -> ToolCallAgent think / act
-  -> ChatClient + DashScope
-  -> 工具调用 / RAG / 记忆系统
-  -> 最终自然语言结果
+  -> LifeCoordinator(supervisor)
+  -> ReAct Loop
+  -> DashScope ChatModel
+  -> Tool Calling / RAG / Memory / Delegation
+  -> Final natural-language answer
 ```
 
-主要入口类：
+后端入口：
 
 ```text
 src/main/java/com/yupi/lifeassistant/LifeAssistantApplication.java
@@ -45,115 +51,165 @@ src/main/java/com/yupi/lifeassistant/controller/LifeAssistantController.java
 src/main/java/com/yupi/lifeassistant/app/LifeAssistantApp.java
 ```
 
-## Agent 运行模型
+## Multi-Agent 机制
 
-Agent 相关代码在：
+项目当前不是单一固定 Agent，而是使用 `AgentRegistry` 管理多个 Agent 身份。
+
+当前内置 Agent：
+
+| agentId | name | role | tags |
+| --- | --- | --- | --- |
+| `life-coordinator` | `LifeCoordinator` | supervisor | `supervisor, coordinator, life` |
+| `life-manus` | `LifeManus` | worker | `worker, general, life` |
+| `life-planner` | `LifePlanner` | worker | `worker, planning, schedule, budget, todo, travel, life` |
+| `life-researcher` | `LifeResearcher` | worker | `worker, research, web, rag, archive, life` |
+
+默认 Agent：
+
+```java
+AgentRegistry.DEFAULT_AGENT_ID = "life-coordinator"
+```
+
+也就是说，不传 `agentId` 时，请求默认进入 `LifeCoordinator`，由 supervisor 判断是否直接回答、调用工具，或委派给 worker。
+
+### 动态 Agent Catalog
+
+Supervisor 可用的 worker 列表不写死在 prompt 里，而是由 `AgentRegistry` 动态提供：
+
+```java
+AgentRegistry.describeAvailableAgents()
+AgentRegistry.renderAvailableWorkersForPrompt()
+AgentDelegationTool.listAvailableAgents()
+```
+
+运行时：
+
+1. `LifeAssistantApp` 创建 supervisor 时，会把当前 `AgentRegistry` 中的 worker 清单动态追加到 system prompt。
+2. supervisor 也可以调用 `listAvailableAgents()` 工具再次查询当前可用 Agent。
+3. 新增 worker 时，优先在 `AgentRegistry` 新增 `AgentProfile`，supervisor 会自动感知。
+
+更完整说明见 [README-MULTI-AGENT.md](README-MULTI-AGENT.md)。
+
+## Agent-to-Agent Delegation
+
+Agent-to-Agent 通过 `AgentDelegationTool` 暴露给 supervisor。
+
+当前工具：
+
+```java
+listAvailableAgents()
+delegateToAgent(String targetAgentId, String task)
+delegateToAgentsByTags(String matchAllTags, String matchSomeTags, String task)
+```
+
+调用链：
+
+```text
+LifeCoordinator
+  -> AgentDelegationTool
+  -> AgentCoordinator
+  -> AgentRegistry 查找 worker profile
+  -> new LifeManusAgent(workerProfile, workerTools, ...)
+  -> worker 执行子任务
+  -> worker 结果写入 shared memory
+  -> supervisor 汇总最终答复
+```
+
+`workerTools` 不包含 `AgentDelegationTool`，所以 worker 不能继续递归委派，避免调用链失控。
+
+## Agent 执行循环
+
+核心代码在：
 
 ```text
 src/main/java/com/yupi/lifeassistant/agent
 ```
 
-核心类：
+主要类：
 
-| 类 | 作用 |
+| 类 | 职责 |
 | --- | --- |
-| `BaseAgent` | 管理 Agent 生命周期、ReAct 循环、SSE 输出、cleanup |
+| `BaseAgent` | 生命周期、ReAct 循环、SSE 输出、cleanup |
 | `ReActAgent` | 定义 `think()` / `act()` 抽象流程 |
-| `ToolCallAgent` | 使用模型决定是否调用工具，并执行 Tool Calling |
-| `LifeManusAgent` | 当前生活助手 Agent 的具体实现和依赖组装 |
-| `TerminateTool` | 让模型主动结束任务 |
-| `AgentRunContext` | 用 `ThreadLocal` 绑定当前 `chatId` |
-| `ChatMemoryCompressAgent` | Letta 风格 FIFO 上下文压缩器 |
+| `ToolCallAgent` | 使用模型决策并执行工具调用 |
+| `LifeManusAgent` | 按 `AgentProfile` 装配具体运行实例 |
+| `AgentRegistry` | 管理 supervisor / worker 静态身份 |
+| `AgentCoordinator` | 执行 supervisor-worker 委派 |
+| `AgentRunContext` | 用 `ThreadLocal` 让工具拿到当前 conversationId |
+| `ChatMemoryCompressAgent` | Letta 风格上下文压缩 |
 
-当前 Agent 的执行方式是：
+当前输出策略是：中间 step 和工具结果主要用于后端日志和调试，用户看到的是最终自然语言回答。
 
-1. 用户请求进入后，后端拿到 `message` 和 `chatId`。
-2. `LifeAssistantApp` 为本次请求创建新的 `LifeManusAgent`。
-3. `BaseAgent` 进入 ReAct 循环。
-4. `ToolCallAgent.think()` 调用 DashScope，判断是否需要工具。
-5. 如果有工具调用，则 `ToolCallAgent.act()` 执行工具，并继续下一轮。
-6. 任务结束后，只把最终自然语言结果返回给用户，中间步骤作为后端日志或调试记忆。
+## 工具系统
 
-## 模型与 Spring AI
-
-模型配置在：
-
-```text
-src/main/resources/application.yml
-```
-
-当前聊天模型使用 DashScope：
-
-```yaml
-spring:
-  ai:
-    dashscope:
-      chat:
-        options:
-          model: qwen-plus-2025-07-28
-```
-
-`LifeManusAgent` 通过 `ChatClient.builder(dashscopeChatModel)` 构建模型调用链，并挂载：
-
-- `MyLoggerAdvisor`
-- `MessageChatMemoryAdvisor`
-- 自定义 RAG Advisor
-- Tool callbacks
-
-## 工具调用系统
-
-工具注册入口：
+工具注册在：
 
 ```text
 src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
 ```
 
-当前注册的工具包括：
+当前主要工具：
 
-| 工具类 | 能力 |
+| 工具 | 能力 |
 | --- | --- |
-| `LifeFileTool` | 读取、写入、追加生活助手工作区文件 |
+| `LifeFileTool` | 读写生活助手工作区文件 |
 | `WebScrapingTool` | 抓取公开网页文本 |
-| `LifePlannerTool` | 生成日程、餐食计划、穿搭和出行清单 |
+| `LifePlannerTool` | 生成日程、饮食、穿搭、出行清单 |
 | `TodoArchiveTool` | 待办归档 |
 | `BudgetTool` | 预算统计 |
-| `LifeMemoryTool` | Core / Recall / Archival 记忆工具 |
+| `LifeMemoryTool` | core / shared / archival / conversation memory |
+| `AgentDelegationTool` | supervisor 专用的 Agent-to-Agent 工具 |
 | `TerminateTool` | 结束 Agent 任务 |
 
-工具调用由 Spring AI Tool Calling 管理。`ToolCallAgent` 关闭了模型内部自动工具执行：
+工具集分为两套：
 
-```java
-withInternalToolExecutionEnabled(false)
-```
+| 工具集 | 使用者 | 特点 |
+| --- | --- | --- |
+| `workerTools` | worker agents | 不包含 `AgentDelegationTool` |
+| `supervisorTools` | supervisor agent | 包含 `AgentDelegationTool` |
 
-这样可以让项目自己控制每一步工具调用结果、日志、Redis 记忆和最终输出。
+## 记忆与上下文管理
 
-## 上下文记忆系统
-
-当前项目的记忆系统分为三层，参考 Letta 的思路：
+项目使用 Letta 风格的分层记忆：
 
 ```text
+Shared Memory
 Core Memory
 Recall Memory
 Archival Memory
+FIFO active context
+Compressed summary
 ```
 
-相关代码：
+### Shared Memory
+
+同一 root `chatId` 下所有 Agent 共享：
 
 ```text
-src/main/java/com/yupi/lifeassistant/memory
-src/main/java/com/yupi/lifeassistant/chatmemory/RedisChatMemoryRepository.java
+life:memory:shared:{rootChatId}
 ```
 
-### Core Memory
-
-Core Memory 是每轮都进入 system prompt 的稳定记忆，存储在 Redis Hash：
+默认 blocks：
 
 ```text
-life:memory:core:{chatId}
+user_profile
+global_preferences
+team_context
+task_board
+delegation_results
 ```
 
-默认 memory blocks：
+用于保存 supervisor 和 worker 都应该知道的信息，例如任务状态、全局偏好、委派结果。
+
+### Private Core Memory
+
+每个 Agent 自己的长期稳定记忆：
+
+```text
+life:memory:core:{agentId}:{chatId}
+```
+
+默认 blocks：
 
 ```text
 persona
@@ -162,31 +218,29 @@ preferences
 working
 ```
 
-它适合保存用户稳定偏好、长期约束、当前长期计划等。
-
 ### Recall Memory
 
-Recall Memory 使用原有 Redis 对话历史：
+完整对话历史保存在 Redis：
 
 ```text
-chat:memory:{chatId}
+chat:memory:{agentId}:{chatId}
 ```
 
-`RedisChatMemoryRepository` 负责序列化和反序列化用户消息、助手消息、工具调用消息。模型可以通过 `conversationSearch` 工具检索旧对话。
+由自定义 `RedisChatMemoryRepository` 负责序列化、反序列化、搜索和 cleanup。
 
 ### Archival Memory
 
-Archival Memory 是长期向量记忆，存储在独立 PGVector 表：
+长期向量记忆写入独立 PGVector 表：
 
 ```text
 life_archival_memory
 ```
 
-它和 RAG 文档表 `vector_store` 分开，避免“用户长期记忆”和“内置知识库”混在一起。
+它和 RAG 知识库表 `vector_store` 分开，避免用户长期记忆和内置知识库混在一起。
 
-## Letta 风格 FIFO 压缩
+### FIFO 压缩
 
-原先项目使用 Spring AI 的 `MessageWindowChatMemory(maxMessages=100)` 做简单窗口记忆。现在改为自定义：
+上下文窗口由以下组件管理：
 
 ```text
 LettaChatMemory
@@ -194,37 +248,19 @@ LettaChatMemory
   -> ChatMemoryCompressAgent
 ```
 
-核心文件：
+模型实际看到的大致结构：
 
 ```text
-src/main/java/com/yupi/lifeassistant/memory/LettaChatMemory.java
-src/main/java/com/yupi/lifeassistant/memory/ContextQueueManager.java
-src/main/java/com/yupi/lifeassistant/agent/ChatMemoryCompressAgent.java
+System Prompt
++ Dynamic Agent Catalog(supervisor only)
++ Shared Memory Blocks
++ Private Core Memory Blocks
++ Compressed Recall Summary
++ FIFO active messages
++ Current UserPrompt
 ```
 
-机制：
-
-1. Redis 保存完整对话历史，不直接删除旧消息。
-2. `ContextQueueManager` 负责 FIFO 入队和构建当前模型上下文。
-3. 如果活跃上下文过长，`ChatMemoryCompressAgent` 从 FIFO 队首取旧消息。
-4. 旧消息被压缩进 rolling summary。
-5. 模型实际看到的是：
-
-```text
-Core Memory
-+ Compressed recall summary
-+ FIFO 队尾最近消息
-+ 当前用户输入
-```
-
-压缩状态存储在 Redis：
-
-```text
-life:memory:queue:summary:{chatId}
-life:memory:queue:compressed-count:{chatId}
-```
-
-这样既能控制 prompt 长度，又保留完整历史用于 recall 检索。
+更完整说明见 [README-MEMORY.md](README-MEMORY.md)。
 
 ## RAG 知识库
 
@@ -236,13 +272,13 @@ src/main/java/com/yupi/lifeassistant/rag
 
 核心类：
 
-| 类 | 作用 |
+| 类 | 职责 |
 | --- | --- |
-| `LifeDocumentLoader` | 加载 `resources/document/*.md` 文档 |
-| `LifeDocumentTransformer` | 对文档做增强和转换 |
-| `DocumentVersionTracker` | 跟踪文档哈希，支持增量更新 |
+| `LifeDocumentLoader` | 加载 `resources/document/*.md` |
+| `LifeDocumentTransformer` | 增强和转换文档 |
+| `DocumentVersionTracker` | 跟踪文档 hash，支持增量更新 |
 | `PgVectorStoreConfig` | 手动创建 PGVector Store |
-| `RetrievalAugmentAdvisorPlus` | 组装 Spring AI RAG Advisor |
+| `RetrievalAugmentAdvisorPlus` | 组装 RAG Advisor |
 
 内置文档目录：
 
@@ -250,56 +286,63 @@ src/main/java/com/yupi/lifeassistant/rag
 src/main/resources/document
 ```
 
-向量表：
+RAG 向量表：
 
 ```text
 vector_store
 ```
 
-当前 RAG 流程包括：
+PGVector 当前是手动集成，不使用 `spring-ai-starter-vector-store-pgvector` 自动装配；索引类型、距离函数、维度等在代码里指定。
 
-1. 加载 Markdown 文档。
-2. 生成稳定 `stable_id`。
-3. 检测文档内容是否变化。
-4. 对新增或变化文档重新写入 PGVector。
-5. 模型请求时通过 RAG Advisor 检索相关生活知识。
+## 前端与 Nginx
 
-## Redis 记忆持久化
-
-自定义 Redis 对话记忆实现：
+前端在：
 
 ```text
-src/main/java/com/yupi/lifeassistant/chatmemory/RedisChatMemoryRepository.java
+frontend
 ```
 
-它实现了 Spring AI 的 `ChatMemoryRepository`，主要负责：
+主要文件：
 
-- 查找所有 conversation id。
-- 按 `chatId` 读取消息列表。
-- 保存完整消息列表。
-- 删除对话。
-- 序列化工具调用消息。
-- cleanup 阶段删除中间工具消息。
+| 文件 | 说明 |
+| --- | --- |
+| `index.html` | 页面结构 |
+| `styles.css` | ChatGPT 风格布局 |
+| `app.js` | SSE 对话、thread、chatId、本地状态 |
+| `nginx.conf` | Docker / Linux Nginx 配置示例 |
+| `nginx-windows.conf` | Windows Nginx 配置 |
+| `start-nginx.ps1` | Windows 启动脚本 |
+| `stop-nginx.ps1` | Windows 停止脚本 |
 
-当前 Redis 中常见 key：
+前端默认请求：
 
 ```text
-chat:memory:{chatId}
-chat:memory:conversations
-life:memory:core:{chatId}
-life:memory:queue:summary:{chatId}
-life:memory:queue:compressed-count:{chatId}
+/api/ai/life/chat/sse
 ```
 
-## API 接口
+Nginx 默认监听：
 
-Controller 路径：
+```text
+http://localhost:8080
+```
+
+后端默认地址：
+
+```text
+http://localhost:8124/api
+```
+
+直接访问 `http://localhost:8124/` 返回 404 是正常的，因为后端设置了 context path `/api`，且根路径没有页面。页面由 `frontend` 下的 Nginx 提供。
+
+## API
+
+Controller：
 
 ```text
 src/main/java/com/yupi/lifeassistant/controller/LifeAssistantController.java
 ```
 
-后端设置了：
+后端配置：
 
 ```yaml
 server:
@@ -310,63 +353,138 @@ server:
 
 主要接口：
 
-| 接口 | 作用 |
+| 接口 | 说明 |
 | --- | --- |
 | `GET /api/ai/life/health` | 健康检查 |
+| `GET /api/ai/life/agents` | 查看当前可用 Agent |
 | `GET /api/ai/life/chat` | 同步对话 |
 | `GET /api/ai/life/chat/sse` | SSE 流式对话 |
 
-根路径 `http://localhost:8124/` 没有页面，访问会返回 404。前端页面由 `frontend` 下的 nginx 提供。
+示例：
 
-## 推荐代码阅读顺序
+```text
+GET /api/ai/life/chat/sse?message=帮我规划一个高效周末&chatId=abc
+GET /api/ai/life/chat/sse?message=帮我查资料并制定计划&chatId=abc&agentId=life-coordinator
+GET /api/ai/life/chat?message=帮我列一个出行清单&chatId=abc&agentId=life-planner
+```
 
-如果只看后端主流程，推荐顺序：
+## 配置项
+
+主要配置文件：
+
+```text
+src/main/resources/application.yml
+```
+
+关键配置：
+
+```yaml
+spring:
+  ai:
+    dashscope:
+      api-key: ${ai.my-api-key}
+      chat:
+        options:
+          model: qwen-plus-2025-07-28
+  datasource:
+    url: jdbc:postgresql://${docker.localhost}:5432/life_assistant_agent
+    username: postgres
+    password: ${pgsql.password}
+  data:
+    redis:
+      host: ${docker.localhost}
+      port: 6379
+
+life-assistant:
+  workspace: ${LIFE_ASSISTANT_WORKSPACE:D:/codex/life-assistant-agent/tmp}
+  vectorstore:
+    auto-init: true
+    force-reinit: false
+```
+
+环境变量 / 占位符含义：
+
+| 配置 | 说明 |
+| --- | --- |
+| `ai.my-api-key` | DashScope API Key |
+| `docker.localhost` | 本机或 Docker 场景下的主机地址 |
+| `pgsql.password` | PostgreSQL 密码 |
+| `LIFE_ASSISTANT_WORKSPACE` | Agent 文件工具工作区 |
+
+## 项目结构
+
+```text
+life-assistant-agent
+├─ frontend
+├─ src/main/java/com/yupi/lifeassistant
+│  ├─ advisor
+│  ├─ agent
+│  ├─ app
+│  ├─ chatmemory
+│  ├─ config
+│  ├─ constant
+│  ├─ controller
+│  ├─ memory
+│  ├─ rag
+│  └─ tools
+├─ src/main/resources
+│  ├─ application.yml
+│  └─ document
+├─ README-MEMORY.md
+├─ README-MULTI-AGENT.md
+└─ pom.xml
+```
+
+## 推荐阅读顺序
+
+如果想理解主流程：
 
 ```text
 1. LifeAssistantController
 2. LifeAssistantApp
-3. LifeManusAgent
-4. BaseAgent
-5. ToolCallAgent
-6. ToolRegistration
-7. LifeMemoryTool
-8. LifeMemoryService
-9. LettaChatMemory
-10. ContextQueueManager
-11. ChatMemoryCompressAgent
-12. RedisChatMemoryRepository
-13. RetrievalAugmentAdvisorPlus
-14. PgVectorStoreConfig
+3. AgentRegistry
+4. LifeManusAgent
+5. BaseAgent
+6. ToolCallAgent
+7. ToolRegistration
+8. AgentDelegationTool
+9. AgentCoordinator
 ```
 
-如果重点看 Letta 风格 memory，请直接阅读：
+如果想理解记忆管理：
 
 ```text
-README-MEMORY.md
+1. README-MEMORY.md
+2. LifeMemoryService
+3. LettaChatMemory
+4. ContextQueueManager
+5. ChatMemoryCompressAgent
+6. RedisChatMemoryRepository
 ```
 
-## 模块边界总结
-
-| 模块 | 职责 |
-| --- | --- |
-| `controller` | HTTP / SSE 接口 |
-| `app` | 应用层入口，创建 Agent |
-| `agent` | ReAct 循环、工具调用、压缩器、Agent 状态 |
-| `tools` | 暴露给模型调用的工具 |
-| `memory` | Core / Recall / Archival 记忆和 FIFO 上下文管理 |
-| `chatmemory` | Redis 对话历史持久化 |
-| `rag` | Markdown 知识库加载、向量化、检索增强 |
-| `advisor` | Spring AI Advisor 扩展 |
-| `config` | Web 配置 |
-
-整体上，这个项目后端可以看作：
+如果想理解多 Agent：
 
 ```text
-Spring Boot API
-+ Spring AI Agent Loop
-+ DashScope Chat Model
-+ Tool Calling
-+ Redis Conversation Memory
-+ Letta-style Context Memory
-+ PGVector RAG / Archival Memory
+1. README-MULTI-AGENT.md
+2. AgentRegistry
+3. AgentDelegationTool
+4. AgentCoordinator
+5. ToolRegistration
 ```
+
+## 当前设计取舍
+
+当前实现优先保证流程清晰和可调试：
+
+- Delegation 是同步执行，不是异步 worker job。
+- worker 结果既作为 tool result 返回给 supervisor，也写入 shared memory。
+- Redis 保留完整对话历史，进入模型上下文的是 FIFO active window + compressed summary。
+- PGVector 分成 RAG 知识库和 archival memory 两张表，避免职责混杂。
+- 前端只负责 chatId、SSE 展示和本地 thread 状态，核心 Agent 状态在后端。
+
+后续如果要继续增强，可以考虑：
+
+- 将 `AgentCoordinator` 改造成异步任务调度器。
+- 给 worker job 增加状态机和持久化。
+- 在前端加入 Agent 选择器，调用 `/api/ai/life/agents` 动态展示可用 Agent。
+- 给 shared memory 增加可视化调试页面。
