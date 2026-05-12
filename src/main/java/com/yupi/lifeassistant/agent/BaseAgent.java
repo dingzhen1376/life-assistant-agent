@@ -144,7 +144,9 @@ public abstract class BaseAgent {
             return systemPrompt;
         }
         // Core Memory 每轮都进入 system prompt，这是 Letta memory blocks 的主要入口。
-        return systemPrompt + "\n\n" + lifeMemoryService.renderCoreMemory(chatId);
+        // 每轮把 shared memory + 当前 Agent 的 private core memory 拼进 system prompt，
+        // 这是 Letta memory blocks 在本项目里的主要入口。
+        return systemPrompt + "\n\n" + lifeMemoryService.renderMemoryContext(chatId);
     }
 
     protected String getFinalAssistantPrompt() {

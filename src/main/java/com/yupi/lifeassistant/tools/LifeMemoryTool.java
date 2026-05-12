@@ -47,6 +47,29 @@ public class LifeMemoryTool {
     }
 
     @Tool(description = """
+            Insert durable information into shared memory blocks visible to all agents in this chat.
+            Use for user-level facts, global preferences, task context, or worker coordination state.
+            Common block names: user_profile, global_preferences, team_context, task_board, delegation_results.
+            """)
+    public String sharedMemoryInsert(
+            @ToolParam(description = "Shared memory block name") String blockName,
+            @ToolParam(description = "Concise shared memory text to append") String content) {
+        // requireChatId 返回的是 agentId:rootChatId；Service 内部会取 rootChatId 定位 shared blocks。
+        return lifeMemoryService.insertSharedMemory(requireChatId(), blockName, content);
+    }
+
+    @Tool(description = """
+            Replace an entire shared memory block visible to all agents in this chat.
+            Use when the shared task board, global preferences, or team context needs a clean rewrite.
+            """)
+    public String sharedMemoryReplace(
+            @ToolParam(description = "Shared memory block name") String blockName,
+            @ToolParam(description = "Complete replacement text for the shared memory block") String newText) {
+        // shared memory 是同一 root chat 下所有 Agent 可见的团队级上下文。
+        return lifeMemoryService.replaceSharedMemory(requireChatId(), blockName, newText);
+    }
+
+    @Tool(description = """
             Store information in archival memory.
             Use for long notes, discovered facts, research snippets, and details worth saving but not worth keeping in core memory.
             """)

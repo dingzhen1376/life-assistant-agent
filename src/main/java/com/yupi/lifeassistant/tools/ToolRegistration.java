@@ -15,8 +15,9 @@ public class ToolRegistration {
     @Value("${life-assistant.workspace:" + FileConstant.DEFAULT_WORKSPACE + "}")
     private String workspace;
 
-    @Bean
-    public ToolCallback[] allTools(LifeMemoryService lifeMemoryService) {
+    @Bean("workerTools")
+    public ToolCallback[] workerTools(LifeMemoryService lifeMemoryService) {
+        // Worker 只保留执行类工具和记忆工具，不注册委派工具，避免 worker 之间无限转派。
         return ToolCallbacks.from(
                 new LifeFileTool(workspace),
                 new WebScrapingTool(),
@@ -24,6 +25,22 @@ public class ToolRegistration {
                 new TodoArchiveTool(),
                 new BudgetTool(),
                 new LifeMemoryTool(lifeMemoryService),
+                new TerminateTool()
+        );
+    }
+
+    @Bean("supervisorTools")
+    public ToolCallback[] supervisorTools(LifeMemoryService lifeMemoryService,
+                                          AgentDelegationTool agentDelegationTool) {
+        // Supervisor 比 worker 多一个 AgentDelegationTool，用于把子任务路由给专门 worker。
+        return ToolCallbacks.from(
+                new LifeFileTool(workspace),
+                new WebScrapingTool(),
+                new LifePlannerTool(),
+                new TodoArchiveTool(),
+                new BudgetTool(),
+                new LifeMemoryTool(lifeMemoryService),
+                agentDelegationTool,
                 new TerminateTool()
         );
     }

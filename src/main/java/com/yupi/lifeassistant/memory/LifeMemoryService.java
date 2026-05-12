@@ -30,14 +30,25 @@ import static org.springframework.ai.vectorstore.filter.Filter.ExpressionType.EQ
 import static org.springframework.ai.vectorstore.pgvector.PgVectorStore.PgDistanceType.COSINE_DISTANCE;
 import static org.springframework.ai.vectorstore.pgvector.PgVectorStore.PgIndexType.HNSW;
 
+/**
+ * Letta-style memory service.
+ *
+ * <p>本类同时管理三类记忆：
+ * core memory：当前 Agent 私有、每轮进入 system prompt；
+ * shared memory：同一 root chat 下所有 Agent 可见；
+ * archival memory：长文本和研究资料进入 PGVector，需要时检索。
+ */
 @Service
 @Slf4j
 public class LifeMemoryService {
 
     // Core memory 始终进入 system prompt；archival memory 存在独立 PGVector 表，按需检索。
+    // Shared memory 只按 rootChatId 建 key，确保 coordinator 和 worker 看到同一组 blocks。
+    private static final String SHARED_MEMORY_KEY_PREFIX = "life:memory:shared:";
     private static final String CORE_MEMORY_KEY_PREFIX = "life:memory:core:";
     private static final String ARCHIVAL_MEMORY_TYPE = "archival";
     private static final int MAX_CORE_BLOCK_CHARS = 4000;
+    private static final int MAX_SHARED_BLOCK_CHARS = 12000;
     private static final int ARCHIVAL_CHUNK_CHARS = 3000;
     private static final int ARCHIVAL_CHUNK_OVERLAP_CHARS = 200;
     private static final List<String> DEFAULT_BLOCK_ORDER = List.of("persona", "human", "preferences", "working");
@@ -86,6 +97,34 @@ public class LifeMemoryService {
         return builder.toString();
     }
 
+    /**
+     * 统一渲染进入 system prompt 的记忆上下文。
+     *
+     * <p>先拼 shared memory，再拼当前 Agent 的 core memory，让 Agent 既能看到团队上下文，
+     * 又能保留自己的私有长期状态。
+     */
+    public String renderMemoryContext(String conversationId) {
+        return renderSharedMemory(conversationId) + "\n" + renderCoreMemory(conversationId);
+    }
+
+    /**
+     * 渲染同一 root chat 下所有 Agent 共享的 blocks。
+     */
+    public String renderSharedMemory(String conversationId) {
+        Map<String, String> blocks = getSharedMemory(conversationId);
+        StringBuilder builder = new StringBuilder();
+        builder.append("""
+                Shared memory blocks (visible to all agents in this chat):
+                - These blocks are shared across supervisor and worker agents.
+                - Store user-level facts, global preferences, common task context, and delegation results here.
+                """);
+        for (Map.Entry<String, String> entry : blocks.entrySet()) {
+            builder.append("\n[shared.").append(entry.getKey()).append("]\n");
+            builder.append(StrUtil.blankToDefault(entry.getValue(), "(empty)")).append('\n');
+        }
+        return builder.toString();
+    }
+
     public Map<String, String> getCoreMemory(String chatId) {
         Assert.hasText(chatId, "chatId cannot be null or empty");
         //初始化 core memory
@@ -110,6 +149,32 @@ public class LifeMemoryService {
         return ordered;
     }
 
+    /**
+     * 获取 shared memory 时会先做懒初始化，并固定常用 block 的展示顺序。
+     *
+     * <p>固定顺序可以降低 prompt 抖动，方便模型稳定理解“团队工作台”的结构。
+     */
+    public Map<String, String> getSharedMemory(String conversationId) {
+        Assert.hasText(conversationId, "conversationId cannot be null or empty");
+        initializeSharedMemory(conversationId);
+        // key= life:memory:shared:{conversationId}
+        String key = getSharedMemoryKey(conversationId);
+        Map<Object, Object> raw = stringRedisTemplate.opsForHash().entries(key);
+        Map<String, String> ordered = new LinkedHashMap<>();
+        List<String> blockOrder = List.of("user_profile", "global_preferences", "team_context", "task_board", "delegation_results");
+        for (String blockName : blockOrder) {
+            Object value = raw.get(blockName);
+            ordered.put(blockName, value == null ? "" : String.valueOf(value));
+        }
+        // 处理raw里面的其他 block
+        raw.entrySet().stream()
+                .map(entry -> Map.entry(String.valueOf(entry.getKey()), String.valueOf(entry.getValue())))
+                .filter(entry -> !ordered.containsKey(entry.getKey()))
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> ordered.put(entry.getKey(), entry.getValue()));
+        return ordered;
+    }
+
     // 插入 core memory
     public String insertCoreMemory(String chatId, String blockName, String content) {
         //规范化 block name 和 content
@@ -125,6 +190,38 @@ public class LifeMemoryService {
         validateCoreBlockSize(normalizedBlockName, nextValue);
         stringRedisTemplate.opsForHash().put(key, normalizedBlockName, nextValue);
         return "Core memory updated: " + normalizedBlockName;
+    }
+
+    /**
+     * 向 shared memory 追加内容。
+     *
+     * <p>适合记录跨 Agent 都需要知道的用户偏好、任务进度、worker 产出等信息。
+     */
+    public String insertSharedMemory(String conversationId, String blockName, String content) {
+        String normalizedBlockName = normalizeBlockName(blockName);
+        String normalizedContent = normalizeContent(content, "content");
+        String key = getSharedMemoryKey(conversationId);
+        initializeSharedMemory(conversationId);
+
+        String oldValue = getBlockValue(key, normalizedBlockName);
+        String nextValue = StrUtil.isBlank(oldValue) ? normalizedContent : oldValue + "\n" + normalizedContent;
+        validateSharedBlockSize(normalizedBlockName, nextValue);
+        stringRedisTemplate.opsForHash().put(key, normalizedBlockName, nextValue);
+        return "Shared memory updated: " + normalizedBlockName;
+    }
+
+    /**
+     * 整体替换某个 shared memory block。
+     *
+     * <p>当 task_board 或 team_context 逐步追加后变得冗余时，用替换保持上下文短而清晰。
+     */
+    public String replaceSharedMemory(String conversationId, String blockName, String newText) {
+        String normalizedBlockName = normalizeBlockName(blockName);
+        String normalizedNewText = normalizeContent(newText, "newText");
+        validateSharedBlockSize(normalizedBlockName, normalizedNewText);
+        initializeSharedMemory(conversationId);
+        stringRedisTemplate.opsForHash().put(getSharedMemoryKey(conversationId), normalizedBlockName, normalizedNewText);
+        return "Shared memory replaced: " + normalizedBlockName;
     }
 
     // 更新整个 core memory block，避免让模型传 exact oldText 带来的匹配不稳定。
@@ -235,7 +332,7 @@ public class LifeMemoryService {
         String key = getCoreMemoryKey(chatId);
         //当这些block为空的时候才会初始化
         stringRedisTemplate.opsForHash().putIfAbsent(key, "persona",
-                "LifeManus is a practical life assistant that plans, researches, organizes, and completes everyday tasks.");
+                "The active agent persona is defined by the selected AgentProfile system prompt.");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "human",
                 "No stable user profile has been confirmed yet.");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "preferences",
@@ -244,13 +341,49 @@ public class LifeMemoryService {
                 "No active long-running plan is stored.");
     }
 
+    private void initializeSharedMemory(String conversationId) {
+        Assert.hasText(conversationId, "conversationId cannot be null or empty");
+        String key = getSharedMemoryKey(conversationId);
+        // shared blocks 模拟 Letta 的共享 Memory Blocks，是 supervisor-worker 协作的公共白板。
+        stringRedisTemplate.opsForHash().putIfAbsent(key, "user_profile",
+                "No shared user profile has been confirmed yet.");
+        stringRedisTemplate.opsForHash().putIfAbsent(key, "global_preferences",
+                "No shared global preferences have been confirmed yet.");
+        stringRedisTemplate.opsForHash().putIfAbsent(key, "team_context",
+                "No shared multi-agent task context is stored.");
+        stringRedisTemplate.opsForHash().putIfAbsent(key, "task_board",
+                "No shared task board is active.");
+        stringRedisTemplate.opsForHash().putIfAbsent(key, "delegation_results",
+                "No delegation results have been recorded yet.");
+    }
+
     private static String getCoreMemoryKey(String chatId) {
         return CORE_MEMORY_KEY_PREFIX + chatId;
+    }
+
+    /**
+     * shared memory 不使用完整 conversationId，而使用 rootChatId。
+     *
+     * <p>例如 life-coordinator:abc 和 life-planner:abc 都会映射到 life:memory:shared:abc。
+     */
+    private static String getSharedMemoryKey(String conversationId) {
+        return SHARED_MEMORY_KEY_PREFIX + extractRootChatId(conversationId);
     }
 
     private String getBlockValue(String key, String blockName) {
         Object value = stringRedisTemplate.opsForHash().get(key, blockName);
         return value == null ? "" : String.valueOf(value);
+    }
+
+    /**
+     * 从 agentId:rootChatId 中取 rootChatId；没有 agentId 前缀时兼容老数据，直接返回原值。
+     */
+    private static String extractRootChatId(String conversationId) {
+        int separatorIndex = conversationId.indexOf(':');
+        if (separatorIndex < 0 || separatorIndex == conversationId.length() - 1) {
+            return conversationId;
+        }
+        return conversationId.substring(separatorIndex + 1);
     }
 
     // 将长文本拆分为多个块
@@ -293,6 +426,12 @@ public class LifeMemoryService {
     private static void validateCoreBlockSize(String blockName, String content) {
         if (content.length() > MAX_CORE_BLOCK_CHARS) {
             throw new IllegalArgumentException("Core memory block is too long: " + blockName);
+        }
+    }
+
+    private static void validateSharedBlockSize(String blockName, String content) {
+        if (content.length() > MAX_SHARED_BLOCK_CHARS) {
+            throw new IllegalArgumentException("Shared memory block is too long: " + blockName);
         }
     }
 
