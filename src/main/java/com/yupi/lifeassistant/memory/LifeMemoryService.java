@@ -205,6 +205,7 @@ public class LifeMemoryService {
 
         String oldValue = getBlockValue(key, normalizedBlockName);
         String nextValue = StrUtil.isBlank(oldValue) ? normalizedContent : oldValue + "\n" + normalizedContent;
+        // 检查 block size，避免超出限制
         validateSharedBlockSize(normalizedBlockName, nextValue);
         stringRedisTemplate.opsForHash().put(key, normalizedBlockName, nextValue);
         return "Shared memory updated: " + normalizedBlockName;

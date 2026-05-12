@@ -3,6 +3,7 @@ package com.yupi.lifeassistant.agent;
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.agent.model.AgentProfile;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
@@ -20,7 +21,12 @@ import java.util.stream.Collectors;
  * 共享记忆写入都集中在这里，避免把 Agent-to-Agent 逻辑散落到普通工具里。
  */
 @Component
+@Slf4j
 public class AgentCoordinator {
+
+    private static final int MAX_DELEGATION_ATTEMPTS = 2;
+    private static final int MAX_DELEGATION_TASK_CHARS = 500;
+    private static final int MAX_DELEGATION_RESULT_CHARS = 2000;
 
     /**
      * workerTools 不包含 AgentDelegationTool，防止 worker 再递归委派导致调用链失控。
@@ -50,22 +56,25 @@ public class AgentCoordinator {
     }
 
     // Supervisor分配任务给Worker
-    //TODO Agent调用失败有没有兜底机制？比如重试或者返回一个友好信息
     public String delegateToAgent(String currentConversationId, String targetAgentId, String task) {
         if (StrUtil.isBlank(task)) {
             return "Delegation failed: task cannot be blank.";
         }
-        AgentProfile targetProfile = agentRegistry.getProfile(targetAgentId);
+        AgentProfile targetProfile;
+        try {
+            targetProfile = agentRegistry.getProfile(targetAgentId);
+        } catch (IllegalArgumentException e) {
+            return "Delegation failed: unknown target agent. Call listAvailableAgents to choose a valid worker.";
+        }
         if (targetProfile.supervisor()) {
             return "Delegation failed: target agent is a supervisor, choose a worker agent.";
         }
         // 保留 supervisor 的 rootChatId，但切到 worker 自己的 private conversation namespace。
         // 运行Worker Agent
-        String workerResponse = runWorker(currentConversationId, targetProfile, task);
-        // worker 的可复用结果写进 shared memory，后续 supervisor 和其他 worker 都可以看到。
-        //TODO 每次WorkerAgent的回复都要加进ShareMemory吗？会不会有些冗余，能不能只加必要的
-        recordDelegationResult(currentConversationId, targetProfile, task, workerResponse);
-        return formatDelegationResult(targetProfile, workerResponse);
+        DelegationOutcome outcome = runWorkerWithFallback(currentConversationId, targetProfile, task);
+        // worker 的可复用结果会以压缩摘要写进 shared memory，避免 delegation_results 持续膨胀。
+        recordDelegationResult(currentConversationId, targetProfile, task, outcome);
+        return formatDelegationResult(targetProfile, outcome.response());
     }
     //分配给某些标签的一组Worker
     public String delegateToAgentsByTags(String currentConversationId,
@@ -92,19 +101,57 @@ public class AgentCoordinator {
         return workerAgent.run(buildWorkerPrompt(targetProfile, task), workerConversationId);
     }
 
-    //记录worker的执行结果
+    //带兜底机制的Agent调用,调用失败之后重试，最多重试两次，两次失败之后返回失败原因
+    private DelegationOutcome runWorkerWithFallback(String currentConversationId, AgentProfile targetProfile, String task) {
+        String lastFailureReason = "";
+        for (int attempt = 1; attempt <= MAX_DELEGATION_ATTEMPTS; attempt++) {
+            try {
+                String workerResponse = runWorker(currentConversationId, targetProfile, task);
+                if (isUsableWorkerResponse(workerResponse)) {
+                    return new DelegationOutcome(workerResponse, attempt, false, "");
+                }
+                lastFailureReason = "worker returned an empty or failed response";
+                log.warn("Worker {} returned unusable response on delegation attempt {}: {}",
+                        targetProfile.id(), attempt, abbreviate(workerResponse, 300));
+            } catch (Exception e) {
+                lastFailureReason = e.getMessage();
+                log.warn("Worker {} delegation attempt {} failed", targetProfile.id(), attempt, e);
+            }
+        }
+        String fallbackResponse = """
+                Delegation failed after %d attempt(s).
+                Target worker: %s (%s)
+                Reason: %s
+                Please continue with available context, or tell the user which part could not be completed.
+                """.formatted(MAX_DELEGATION_ATTEMPTS, targetProfile.name(), targetProfile.id(),
+                StrUtil.blankToDefault(lastFailureReason, "unknown error"));
+        return new DelegationOutcome(fallbackResponse, MAX_DELEGATION_ATTEMPTS, true, lastFailureReason);
+    }
+
     private void recordDelegationResult(String currentConversationId,
                                         AgentProfile targetProfile,
                                         String task,
-                                        String workerResponse) {
+                                        DelegationOutcome outcome) {
         String content = """
                 Delegation result
                 Worker: %s (%s)
+                Status: %s
+                Attempts: %d
                 Task: %s
                 Result: %s
-                """.formatted(targetProfile.name(), targetProfile.id(), task, workerResponse);
-        // delegation_results 相当于团队工作台，记录 worker 产出，供最终汇总和后续步骤复用。
-        lifeMemoryService.insertSharedMemory(currentConversationId, "delegation_results", content);
+                """.formatted(targetProfile.name(), targetProfile.id(),
+                outcome.failed() ? "failed" : "success",
+                outcome.attempts(),
+                abbreviate(task, MAX_DELEGATION_TASK_CHARS),
+                abbreviate(outcome.response(), MAX_DELEGATION_RESULT_CHARS));
+        // Store a compact delegation note instead of the full worker trace. If the block is full,
+        // keep the latest result as a fresh compact task board entry rather than failing delegation.
+        try {
+            lifeMemoryService.insertSharedMemory(currentConversationId, "delegation_results", content);
+        } catch (IllegalArgumentException e) {
+            log.warn("delegation_results block is full, replacing it with the latest compact result", e);
+            lifeMemoryService.replaceSharedMemory(currentConversationId, "delegation_results", content);
+        }
     }
 
     private static String buildWorkerPrompt(AgentProfile targetProfile, String task) {
@@ -124,5 +171,25 @@ public class AgentCoordinator {
                 Result:
                 %s
                 """.formatted(profile.name(), profile.id(), workerResponse);
+    }
+
+    private static boolean isUsableWorkerResponse(String workerResponse) {
+        return StrUtil.isNotBlank(workerResponse)
+                && !workerResponse.startsWith("Agent execution failed:")
+                && !workerResponse.startsWith("Delegation failed");
+    }
+
+    private static String abbreviate(String text, int maxChars) {
+        if (StrUtil.isBlank(text)) {
+            return "";
+        }
+        String normalized = text.trim();
+        if (normalized.length() <= maxChars) {
+            return normalized;
+        }
+        return normalized.substring(0, maxChars) + "...";
+    }
+
+    private record DelegationOutcome(String response, int attempts, boolean failed, String failureReason) {
     }
 }

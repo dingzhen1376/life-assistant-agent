@@ -9,7 +9,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 public class LifeFileTool {
-    //TODO 维护一个pdf或者md文档，来维护用户的代办事项
 
     private final Path workspace;
 
