@@ -7,7 +7,9 @@ import jakarta.annotation.Nullable;
 import jakarta.annotation.Resource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
@@ -57,10 +59,29 @@ public class LifeAssistantController {
         }
     }
 
+    @DeleteMapping("/conversations/{chatId}")
+    public Map<String, Object> deleteConversation(@PathVariable String chatId) {
+        try {
+            return Map.of(
+                    "status", "deleted",
+                    "result", lifeAssistantApp.deleteConversation(normalizeRequiredChatId(chatId))
+            );
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
+    }
+
     private String normalizeChatId(String chatId) {
         // chatId 代表一次用户对话的 root id；不同 Agent 会在内部追加自己的 agentId 前缀。
         if (chatId == null || chatId.isBlank()) {
             return UUID.randomUUID().toString();
+        }
+        return chatId.trim();
+    }
+
+    private String normalizeRequiredChatId(String chatId) {
+        if (chatId == null || chatId.isBlank()) {
+            throw new IllegalArgumentException("chatId cannot be blank");
         }
         return chatId.trim();
     }

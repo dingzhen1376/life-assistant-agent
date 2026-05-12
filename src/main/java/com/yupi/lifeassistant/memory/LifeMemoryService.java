@@ -18,10 +18,12 @@ import org.springframework.util.Assert;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -46,6 +48,8 @@ public class LifeMemoryService {
     // Shared memory 只按 rootChatId 建 key，确保 coordinator 和 worker 看到同一组 blocks。
     private static final String SHARED_MEMORY_KEY_PREFIX = "life:memory:shared:";
     private static final String CORE_MEMORY_KEY_PREFIX = "life:memory:core:";
+    private static final String QUEUE_SUMMARY_KEY_PREFIX = "life:memory:queue:summary:";
+    private static final String QUEUE_COMPRESSED_COUNT_KEY_PREFIX = "life:memory:queue:compressed-count:";
     private static final String ARCHIVAL_MEMORY_TYPE = "archival";
     private static final int MAX_CORE_BLOCK_CHARS = 4000;
     private static final int MAX_SHARED_BLOCK_CHARS = 12000;
@@ -55,6 +59,7 @@ public class LifeMemoryService {
 
     private final StringRedisTemplate stringRedisTemplate;
     private final RedisChatMemoryRepository chatMemoryRepository;
+    private final JdbcTemplate jdbcTemplate;
     private final VectorStore archivalMemoryStore;
 
     public LifeMemoryService(StringRedisTemplate stringRedisTemplate,
@@ -64,6 +69,7 @@ public class LifeMemoryService {
         Assert.notNull(jdbcTemplate, "jdbcTemplate cannot be null");
         Assert.notNull(dashscopeEmbeddingModel, "dashscopeEmbeddingModel cannot be null");
         this.stringRedisTemplate = stringRedisTemplate;
+        this.jdbcTemplate = jdbcTemplate;
         this.chatMemoryRepository = RedisChatMemoryRepository.builder()
                 .stringRedisTemplate(stringRedisTemplate)
                 .build();
@@ -327,6 +333,42 @@ public class LifeMemoryService {
         return String.join("\n\n", matches);
     }
 
+    //删除会话
+    public ConversationDeleteResult deleteConversation(String rootChatId, List<String> conversationIds) {
+        String normalizedRootChatId = normalizeContent(rootChatId, "chatId");
+        Set<String> idsToDelete = new LinkedHashSet<>();
+        idsToDelete.add(normalizedRootChatId);
+        if (conversationIds != null) {
+            conversationIds.stream()
+                    .filter(StrUtil::isNotBlank)
+                    .map(String::trim)
+                    .forEach(idsToDelete::add);
+        }
+
+        int chatMemoryDeletes = 0;
+        for (String conversationId : idsToDelete) {
+            chatMemoryRepository.deleteByConversationId(conversationId);
+            chatMemoryDeletes++;
+        }
+
+        List<String> redisKeys = new ArrayList<>();
+        redisKeys.add(getSharedMemoryKey(normalizedRootChatId));
+        for (String conversationId : idsToDelete) {
+            redisKeys.add(getCoreMemoryKey(conversationId));
+            redisKeys.add(QUEUE_SUMMARY_KEY_PREFIX + conversationId);
+            redisKeys.add(QUEUE_COMPRESSED_COUNT_KEY_PREFIX + conversationId);
+        }
+
+        Long deletedRedisKeys = stringRedisTemplate.delete(redisKeys);
+        int deletedArchivalRows = deleteArchivalMemoryRows(idsToDelete);
+        return new ConversationDeleteResult(
+                normalizedRootChatId,
+                chatMemoryDeletes,
+                deletedRedisKeys == null ? 0 : deletedRedisKeys.intValue(),
+                deletedArchivalRows
+        );
+    }
+
     private void initializeCoreMemory(String chatId) {
         Assert.hasText(chatId, "chatId cannot be null or empty");
         //redis的key
@@ -340,6 +382,21 @@ public class LifeMemoryService {
                 "No long-term user preferences have been confirmed yet.");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "working",
                 "No active long-running plan is stored.");
+    }
+
+    private int deleteArchivalMemoryRows(Set<String> conversationIds) {
+        int deletedRows = 0;
+        for (String conversationId : conversationIds) {
+            try {
+                deletedRows += jdbcTemplate.update(
+                        "DELETE FROM life_archival_memory WHERE metadata->>'chat_id' = ?",
+                        conversationId
+                );
+            } catch (Exception e) {
+                log.warn("Failed to delete archival memory for conversationId={}", conversationId, e);
+            }
+        }
+        return deletedRows;
     }
 
     private void initializeSharedMemory(String conversationId) {
@@ -472,5 +529,13 @@ public class LifeMemoryService {
                             + "\nContent: " + document.getText();
                 })
                 .collect(Collectors.joining("\n\n"));
+    }
+
+    public record ConversationDeleteResult(
+            String chatId,
+            int chatConversationsDeleted,
+            int redisKeysDeleted,
+            int archivalRowsDeleted
+    ) {
     }
 }

@@ -111,6 +111,7 @@ button {
 .ghost-btn,
 .primary-btn,
 .thread-item,
+.thread-delete-btn,
 .prompt-chip {
   border: 1px solid var(--border);
   background: var(--bg);
@@ -130,6 +131,7 @@ button {
 
 .new-chat-btn:hover,
 .thread-item:hover,
+.thread-delete-btn:hover,
 .ghost-btn:hover,
 .prompt-chip:hover {
   background: var(--surface-strong);
@@ -145,8 +147,16 @@ button {
   overflow-y: auto;
 }
 
+.thread-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
 .thread-item {
-  width: 100%;
+  flex: 1 1 auto;
+  width: auto;
   min-height: 38px;
   padding: 9px 10px;
   border-radius: 8px;
@@ -154,6 +164,28 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.thread-delete-btn {
+  display: grid;
+  place-items: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.thread-row:hover .thread-delete-btn,
+.thread-row:focus-within .thread-delete-btn,
+.thread-row.active .thread-delete-btn {
+  opacity: 1;
+}
+
+.thread-delete-btn:hover {
+  color: var(--danger);
 }
 
 .thread-item.active {
@@ -463,6 +495,10 @@ textarea {
     transform: translateX(-100%);
     transition: transform 160ms ease;
     box-shadow: var(--shadow);
+  }
+
+  .thread-delete-btn {
+    opacity: 1;
   }
 
   body.sidebar-open .sidebar {

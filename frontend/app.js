@@ -175,6 +175,9 @@ function setBusy(isBusy) {
 function renderThreads() {
   els.threadList.innerHTML = "";
   state.threads.forEach((thread) => {
+    const row = document.createElement("div");
+    row.className = `thread-row${thread.id === state.activeThreadId ? " active" : ""}`;
+
     const button = document.createElement("button");
     button.type = "button";
     button.className = `thread-item${thread.id === state.activeThreadId ? " active" : ""}`;
@@ -188,8 +191,69 @@ function renderThreads() {
       renderMessages();
       closeMobileSidebar();
     });
-    els.threadList.appendChild(button);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "thread-delete-btn";
+    deleteBtn.textContent = "×";
+    deleteBtn.title = "删除对话";
+    deleteBtn.setAttribute("aria-label", `删除对话：${thread.title || "新对话"}`);
+    deleteBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteThread(thread.id);
+    });
+
+    row.append(button, deleteBtn);
+    els.threadList.appendChild(row);
   });
+}
+
+async function deleteThread(threadId) {
+  const thread = state.threads.find((item) => item.id === threadId);
+  if (!thread) {
+    return;
+  }
+  const title = thread.title || "新对话";
+  if (!confirm(`删除对话「${title}」？后端 Redis 和 PGVector 中的对应记忆也会删除。`)) {
+    return;
+  }
+
+  const wasActive = state.activeThreadId === thread.id;
+  if (wasActive) {
+    stopStreaming();
+  }
+
+  try {
+    await deleteRemoteConversation(thread.chatId);
+    state.threads = state.threads.filter((item) => item.id !== thread.id);
+    if (!state.threads.length) {
+      createThread();
+    } else if (wasActive) {
+      state.activeThreadId = state.threads[0].id;
+    }
+    persist();
+    renderThreads();
+    renderMessages();
+    closeMobileSidebar();
+  } catch (error) {
+    els.connectionState.textContent = "删除失败";
+    alert(`删除失败：${error.message || "请检查后端服务"}`);
+  }
+}
+
+async function deleteRemoteConversation(chatId) {
+  if (!chatId) {
+    return;
+  }
+  const url = `${state.apiBase || DEFAULT_API_BASE}/ai/life/conversations/${encodeURIComponent(chatId)}`;
+  const response = await fetch(url, {
+    method: "DELETE",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
 }
 
 function renderMessages() {

@@ -48,6 +48,14 @@ public class LifeAssistantApp {
         return agentRegistry.listAgents();
     }
 
+    public LifeMemoryService.ConversationDeleteResult deleteConversation(String chatId) {
+        List<String> conversationIds = agentRegistry.listAgents().stream()
+                .map(AgentSummary::id)
+                .map(agentId -> agentRegistry.buildConversationId(agentId, chatId))
+                .toList();
+        return lifeMemoryService.deleteConversation(chatId, conversationIds);
+    }
+
     public String chat(String message, String chatId) {
         return chat(message, chatId, AgentRegistry.DEFAULT_AGENT_ID);
     }
