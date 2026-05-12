@@ -93,6 +93,112 @@ public class ChatMemoryCompressAgent {
         return new CompressionState(rollingSummary, compressedCount);
     }
 
+    /**
+     * 压缩 shared memory 中的单个 block。
+     *
+     * <p>它和 FIFO 对话压缩不同：这里不移动消息游标，只把某个 shared memory block
+     * 的旧内容和最新增量折叠成一段更短的团队上下文。AgentCoordinator 会用它压缩
+     * delegation_results，避免 worker 委派结果无限追加导致 shared memory 过大。
+     */
+    public synchronized String compressSharedMemoryBlock(String blockName,
+                                                         String currentText,
+                                                         String newEntry,
+                                                         int targetChars) {
+        String oldText = StrUtil.blankToDefault(currentText, "");
+        String incomingText = StrUtil.blankToDefault(newEntry, "");
+        if (StrUtil.isBlank(oldText) && StrUtil.isBlank(incomingText)) {
+            return "";
+        }
+        try {
+            String summary = chatClient.prompt()
+                    .system("""
+                            You are the shared memory compression manager for a Letta-style multi-agent system.
+                            Compress one shared memory block by merging the existing block and the newest entry.
+
+                            Rules:
+                            1. Preserve worker names, task goals, final useful outcomes, failures, constraints, and open questions.
+                            2. Remove duplicate worker traces, verbose intermediate steps, boilerplate, and stale details.
+                            3. Keep the result as a compact team memory that supervisor and workers can reuse.
+                            4. Prefer Chinese when the content is Chinese.
+                            5. Do not invent facts that are not present in the input.
+                            6. Return only the compressed block text.
+                            """)
+                    .user("""
+                            Shared memory block name:
+                            %s
+
+                            Target maximum characters:
+                            %d
+
+                            Existing block:
+                            %s
+
+                            New entry:
+                            %s
+
+                            Compressed shared memory block:
+                            """.formatted(blockName, targetChars,
+                            StrUtil.blankToDefault(oldText, "(empty)"),
+                            StrUtil.blankToDefault(incomingText, "(empty)")))
+                    .call()
+                    .content();
+            if (StrUtil.isNotBlank(summary)) {
+                return limitText(summary.trim(), targetChars);
+            }
+        } catch (Exception e) {
+            log.warn("Shared memory block compression failed for blockName={}, using fallback", blockName, e);
+        }
+        return fallbackSharedMemorySummary(oldText, incomingText, targetChars);
+    }
+
+    /**
+     * 压缩一段即将写入 memory 的长文本。
+     *
+     * <p>用于单条 delegation task / result 过长的场景。和粗暴 substring 不同，
+     * 这里先让模型提取可复用事实、结论、失败原因和待办；只有模型压缩失败时才使用兜底截断。
+     */
+    public synchronized String compressLongText(String purpose, String text, int targetChars) {
+        String sourceText = StrUtil.blankToDefault(text, "").trim();
+        if (StrUtil.isBlank(sourceText) || sourceText.length() <= targetChars) {
+            return sourceText;
+        }
+        try {
+            String summary = chatClient.prompt()
+                    .system("""
+                            You are a memory compression manager for a Letta-style agent system.
+                            Compress one long text before it is written into memory.
+
+                            Rules:
+                            1. Preserve names, task goals, final outcomes, constraints, failures, file paths, and open questions.
+                            2. Remove repetitive wording, raw traces, boilerplate, and low-value intermediate steps.
+                            3. Keep the result compact and reusable for future supervisor/worker agents.
+                            4. Prefer Chinese when the source text is Chinese.
+                            5. Do not invent facts that are not present in the source text.
+                            6. Return only the compressed text.
+                            """)
+                    .user("""
+                            Compression purpose:
+                            %s
+
+                            Target maximum characters:
+                            %d
+
+                            Source text:
+                            %s
+
+                            Compressed text:
+                            """.formatted(purpose, targetChars, sourceText))
+                    .call()
+                    .content();
+            if (StrUtil.isNotBlank(summary)) {
+                return limitText(summary.trim(), targetChars);
+            }
+        } catch (Exception e) {
+            log.warn("Long text compression failed for purpose={}, using fallback", purpose, e);
+        }
+        return limitText(sourceText, targetChars);
+    }
+
     public List<Message> getActiveMessages(String chatId) {
         CompressionState state = compress(chatId);
         List<Message> allMessages = redisChatMemoryRepository.findByConversationId(chatId);
@@ -238,6 +344,22 @@ public class ChatMemoryCompressAgent {
             return nextSummary.substring(nextSummary.length() - 6000);
         }
         return nextSummary.trim();
+    }
+
+    private static String fallbackSharedMemorySummary(String currentText, String newEntry, int targetChars) {
+        String merged = StrUtil.blankToDefault(currentText, "") + "\n\nLatest entry:\n" + StrUtil.blankToDefault(newEntry, "");
+        return limitText(merged.trim(), targetChars);
+    }
+
+    private static String limitText(String text, int targetChars) {
+        if (StrUtil.isBlank(text)) {
+            return "";
+        }
+        int safeLimit = Math.max(1000, targetChars);
+        if (text.length() <= safeLimit) {
+            return text;
+        }
+        return text.substring(text.length() - safeLimit);
     }
 
     private static String summaryKey(String chatId) {

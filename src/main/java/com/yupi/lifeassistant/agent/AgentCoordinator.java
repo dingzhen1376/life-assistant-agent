@@ -27,6 +27,10 @@ public class AgentCoordinator {
     private static final int MAX_DELEGATION_ATTEMPTS = 2;
     private static final int MAX_DELEGATION_TASK_CHARS = 500;
     private static final int MAX_DELEGATION_RESULT_CHARS = 2000;
+    private static final String DELEGATION_RESULTS_BLOCK = "delegation_results";
+    private static final String EMPTY_DELEGATION_RESULTS = "No delegation results have been recorded yet.";
+    private static final int DELEGATION_RESULTS_COMPRESS_THRESHOLD_CHARS = 9000;
+    private static final int DELEGATION_RESULTS_COMPRESS_TARGET_CHARS = 5000;
 
     /**
      * workerTools 不包含 AgentDelegationTool，防止 worker 再递归委派导致调用链失控。
@@ -112,7 +116,7 @@ public class AgentCoordinator {
                 }
                 lastFailureReason = "worker returned an empty or failed response";
                 log.warn("Worker {} returned unusable response on delegation attempt {}: {}",
-                        targetProfile.id(), attempt, abbreviate(workerResponse, 300));
+                        targetProfile.id(), attempt, abbreviateForLog(workerResponse, 300));
             } catch (Exception e) {
                 lastFailureReason = e.getMessage();
                 log.warn("Worker {} delegation attempt {} failed", targetProfile.id(), attempt, e);
@@ -128,10 +132,15 @@ public class AgentCoordinator {
         return new DelegationOutcome(fallbackResponse, MAX_DELEGATION_ATTEMPTS, true, lastFailureReason);
     }
 
+    //记录代理结果
     private void recordDelegationResult(String currentConversationId,
                                         AgentProfile targetProfile,
                                         String task,
                                         DelegationOutcome outcome) {
+        // 压缩AI给出的task（过长的话，小于限制字符串就返回原文）
+        String compactTask = compressLongDelegationText("delegation task", task, MAX_DELEGATION_TASK_CHARS);
+        // 压缩AI给出的结果（过长的话，小于限制字符串就返回原文）
+        String compactResult = compressLongDelegationText("delegation result", outcome.response(), MAX_DELEGATION_RESULT_CHARS);
         String content = """
                 Delegation result
                 Worker: %s (%s)
@@ -142,16 +151,57 @@ public class AgentCoordinator {
                 """.formatted(targetProfile.name(), targetProfile.id(),
                 outcome.failed() ? "failed" : "success",
                 outcome.attempts(),
-                abbreviate(task, MAX_DELEGATION_TASK_CHARS),
-                abbreviate(outcome.response(), MAX_DELEGATION_RESULT_CHARS));
-        // Store a compact delegation note instead of the full worker trace. If the block is full,
-        // keep the latest result as a fresh compact task board entry rather than failing delegation.
-        try {
-            lifeMemoryService.insertSharedMemory(currentConversationId, "delegation_results", content);
-        } catch (IllegalArgumentException e) {
-            log.warn("delegation_results block is full, replacing it with the latest compact result", e);
-            lifeMemoryService.replaceSharedMemory(currentConversationId, "delegation_results", content);
+                compactTask,
+                compactResult);
+        // delegation_results 是所有 Agent 都会看到的团队记忆，不能无限追加。
+        // 当旧 block + 新委派摘要超过阈值时，交给 ChatMemoryCompressAgent 做一次语义压缩，
+        // 保留关键 worker 结论、失败原因和未解决问题，再替换 shared memory block。
+        //拿到当前sharememory的delegation_results
+        String currentBlock = getCurrentDelegationResults(currentConversationId);
+        String nextBlock = StrUtil.isBlank(currentBlock) ? content : currentBlock + "\n" + content;
+        if (nextBlock.length() >= DELEGATION_RESULTS_COMPRESS_THRESHOLD_CHARS) {
+            compressAndReplaceDelegationResults(currentConversationId, currentBlock, content);
+            return;
         }
+        try {
+            lifeMemoryService.insertSharedMemory(currentConversationId, DELEGATION_RESULTS_BLOCK, content);
+        } catch (IllegalArgumentException e) {
+            log.warn("delegation_results block exceeded hard limit, compressing shared memory before replace", e);
+            compressAndReplaceDelegationResults(currentConversationId, currentBlock, content);
+        }
+    }
+
+    private String getCurrentDelegationResults(String currentConversationId) {
+        String currentBlock = lifeMemoryService.getSharedMemory(currentConversationId)
+                .getOrDefault(DELEGATION_RESULTS_BLOCK, "");
+        if (EMPTY_DELEGATION_RESULTS.equals(currentBlock)) {
+            return "";
+        }
+        return currentBlock;
+    }
+
+    private void compressAndReplaceDelegationResults(String currentConversationId,
+                                                     String currentBlock,
+                                                     String latestEntry) {
+        String compressedBlock = chatMemoryCompressAgent.compressSharedMemoryBlock(
+                DELEGATION_RESULTS_BLOCK,
+                currentBlock,
+                latestEntry,
+                DELEGATION_RESULTS_COMPRESS_TARGET_CHARS
+        );
+        lifeMemoryService.replaceSharedMemory(currentConversationId, DELEGATION_RESULTS_BLOCK, compressedBlock);
+    }
+
+    private String compressLongDelegationText(String purpose, String text, int targetChars) {
+        if (StrUtil.isBlank(text)) {
+            return "";
+        }
+        String normalized = text.trim();
+        if (normalized.length() <= targetChars) {
+            return normalized;
+        }
+        // 单条 task/result 过长时也交给压缩 Agent 做语义摘要，避免在写入 memory 前直接截断关键信息。
+        return chatMemoryCompressAgent.compressLongText(purpose, normalized, targetChars);
     }
 
     private static String buildWorkerPrompt(AgentProfile targetProfile, String task) {
@@ -179,7 +229,7 @@ public class AgentCoordinator {
                 && !workerResponse.startsWith("Delegation failed");
     }
 
-    private static String abbreviate(String text, int maxChars) {
+    private static String abbreviateForLog(String text, int maxChars) {
         if (StrUtil.isBlank(text)) {
             return "";
         }
