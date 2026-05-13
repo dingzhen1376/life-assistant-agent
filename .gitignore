@@ -8,6 +8,9 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### frontend ###
+/frontend/nginx-1.30.0/logs/
+
 ### STS ###
 .apt_generated
 .classpath
@@ -38,4 +41,3 @@ build/
 
 .env
 
-/frontend/nginx-1.30.0/logs
