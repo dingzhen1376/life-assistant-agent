@@ -310,6 +310,9 @@ public class LifeMemoryService {
         List<String> tokens = tokenize(normalizedQuery);
         //获取Redis历史对话
         List<Message> messages = chatMemoryRepository.findByConversationId(chatId);
+        //删掉最后一条消息，因为此时最后一条消息是conversationSearch工具调用消息，里面肯定会包含query，把这个消息搜出来没有意义
+        //比如ASSISTANT	调用工具：conversationSearch\n调用ID：call_52037332f34a4f62877c11\n参数：{"query": "第一个问题", "limit": 1}
+        messages.remove(messages.size() - 1);
 
         // Recall memory 使用 Redis 完整历史做轻量关键词检索，和 FIFO 压缩窗口互不冲突。
         List<String> matches = new ArrayList<>();
