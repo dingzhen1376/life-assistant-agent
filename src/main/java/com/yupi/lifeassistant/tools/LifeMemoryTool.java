@@ -3,12 +3,13 @@ package com.yupi.lifeassistant.tools;
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.agent.AgentRunContext;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
 public class LifeMemoryTool {
 
-    // 模型只决定“写什么/查什么”，当前会话由 AgentRunContext 自动绑定。
+    // 模型只决定“写什么/查什么”，当前会话 chatId 由 Spring AI ToolContext 传入。
     private final LifeMemoryService lifeMemoryService;
 
     public LifeMemoryTool(LifeMemoryService lifeMemoryService) {
@@ -22,8 +23,9 @@ public class LifeMemoryTool {
             """)
     public String memoryInsert(
             @ToolParam(description = "Core memory block name, for example human, preferences, or working") String blockName,
-            @ToolParam(description = "Concise memory text to append") String content) {
-        return lifeMemoryService.insertCoreMemory(requireChatId(), blockName, content);
+            @ToolParam(description = "Concise memory text to append") String content,
+            ToolContext toolContext) {
+        return lifeMemoryService.insertCoreMemory(requireChatId(toolContext), blockName, content);
     }
 
     @Tool(description = """
@@ -32,8 +34,9 @@ public class LifeMemoryTool {
             """)
     public String memoryReplace(
             @ToolParam(description = "Core memory block name, for example human, preferences, or working") String blockName,
-            @ToolParam(description = "Complete replacement text for the memory block") String newText) {
-        return lifeMemoryService.replaceCoreMemory(requireChatId(), blockName, newText);
+            @ToolParam(description = "Complete replacement text for the memory block") String newText,
+            ToolContext toolContext) {
+        return lifeMemoryService.replaceCoreMemory(requireChatId(toolContext), blockName, newText);
     }
 
     @Tool(description = """
@@ -42,8 +45,9 @@ public class LifeMemoryTool {
             """)
     public String memoryRethink(
             @ToolParam(description = "Core memory block name, for example human, preferences, or working") String blockName,
-            @ToolParam(description = "Complete new block content") String content) {
-        return lifeMemoryService.rethinkCoreMemory(requireChatId(), blockName, content);
+            @ToolParam(description = "Complete new block content") String content,
+            ToolContext toolContext) {
+        return lifeMemoryService.rethinkCoreMemory(requireChatId(toolContext), blockName, content);
     }
 
     @Tool(description = """
@@ -53,9 +57,10 @@ public class LifeMemoryTool {
             """)
     public String sharedMemoryInsert(
             @ToolParam(description = "Shared memory block name") String blockName,
-            @ToolParam(description = "Concise shared memory text to append") String content) {
+            @ToolParam(description = "Concise shared memory text to append") String content,
+            ToolContext toolContext) {
         // requireChatId 返回的是 agentId:rootChatId；Service 内部会取 rootChatId 定位 shared blocks。
-        return lifeMemoryService.insertSharedMemory(requireChatId(), blockName, content);
+        return lifeMemoryService.insertSharedMemory(requireChatId(toolContext), blockName, content);
     }
 
     @Tool(description = """
@@ -64,9 +69,10 @@ public class LifeMemoryTool {
             """)
     public String sharedMemoryReplace(
             @ToolParam(description = "Shared memory block name") String blockName,
-            @ToolParam(description = "Complete replacement text for the shared memory block") String newText) {
+            @ToolParam(description = "Complete replacement text for the shared memory block") String newText,
+            ToolContext toolContext) {
         // shared memory 是同一 root chat 下所有 Agent 可见的团队级上下文。
-        return lifeMemoryService.replaceSharedMemory(requireChatId(), blockName, newText);
+        return lifeMemoryService.replaceSharedMemory(requireChatId(toolContext), blockName, newText);
     }
 
     @Tool(description = """
@@ -75,8 +81,9 @@ public class LifeMemoryTool {
             """)
     public String archivalMemoryInsert(
             @ToolParam(description = "Archival memory content") String content,
-            @ToolParam(description = "Optional comma-separated tags") String tags) {
-        return lifeMemoryService.insertArchivalMemory(requireChatId(), content, tags);
+            @ToolParam(description = "Optional comma-separated tags") String tags,
+            ToolContext toolContext) {
+        return lifeMemoryService.insertArchivalMemory(requireChatId(toolContext), content, tags);
     }
 
     @Tool(description = """
@@ -85,8 +92,9 @@ public class LifeMemoryTool {
             """)
     public String archivalMemorySearch(
             @ToolParam(description = "Search query") String query,
-            @ToolParam(description = "Maximum number of results, default 5 and maximum 10") int limit) {
-        return lifeMemoryService.searchArchivalMemory(requireChatId(), query, limit);
+            @ToolParam(description = "Maximum number of results, default 5 and maximum 10") int limit,
+            ToolContext toolContext) {
+        return lifeMemoryService.searchArchivalMemory(requireChatId(toolContext), query, limit);
     }
 
     @Tool(description = """
@@ -95,14 +103,18 @@ public class LifeMemoryTool {
             """)
     public String conversationSearch(
             @ToolParam(description = "Keyword or phrase to search for") String query,
-            @ToolParam(description = "Maximum number of results, default 5 and maximum 10") int limit) {
-        return lifeMemoryService.searchConversation(requireChatId(), query, limit);
+            @ToolParam(description = "Maximum number of results, default 5 and maximum 10") int limit,
+            ToolContext toolContext) {
+        return lifeMemoryService.searchConversation(requireChatId(toolContext), query, limit);
     }
 
-    private String requireChatId() {
-        String chatId = AgentRunContext.getChatId();
+    private String requireChatId(ToolContext toolContext) {
+        String chatId = AgentRunContext.getChatId(toolContext);
         if (StrUtil.isBlank(chatId)) {
-            throw new IllegalStateException("No active chatId found for memory tool execution");
+            throw new IllegalStateException("""
+                    No active chatId found in ToolContext for memory tool execution.
+                    Ensure ToolCallingChatOptions.toolContext contains AgentRunContext.CHAT_ID_CONTEXT_KEY.
+                    """);
         }
         return chatId;
     }

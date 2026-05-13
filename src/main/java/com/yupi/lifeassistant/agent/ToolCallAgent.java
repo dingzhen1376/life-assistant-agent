@@ -15,6 +15,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingManager;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.ToolCallback;
 
@@ -46,6 +47,7 @@ public class ToolCallAgent extends ReActAgent {
         if (getCurrentStep() > 1 && StrUtil.isNotBlank(getNextStepPrompt())) {
             getMessageList().add(new UserMessage(getNextStepPrompt()));
         }
+        bindToolContext();
         Prompt prompt = new Prompt(getMessageList(), chatOptions);
         try {
             ChatResponse chatResponse = getChatClient().prompt(prompt)
@@ -85,6 +87,7 @@ public class ToolCallAgent extends ReActAgent {
         if (toolCallChatResponse == null || !toolCallChatResponse.hasToolCalls()) {
             return "No tool call is required.";
         }
+        bindToolContext();
         Prompt prompt = new Prompt(getMessageList(), chatOptions);
         ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, toolCallChatResponse);
         setMessageList(toolExecutionResult.conversationHistory());
@@ -111,6 +114,19 @@ public class ToolCallAgent extends ReActAgent {
         }
 
         return results;
+    }
+
+    private void bindToolContext() {
+        String activeChatId = getChatId();
+        if (StrUtil.isBlank(activeChatId)) {
+            throw new IllegalStateException("Cannot execute tools without an active chatId");
+        }
+        // Tool methods read chatId from Spring AI ToolContext. ThreadLocal is kept only
+        // for older non-ToolContext code paths during the same agent run.
+        AgentRunContext.setChatId(activeChatId);
+        if (chatOptions instanceof ToolCallingChatOptions toolCallingChatOptions) {
+            toolCallingChatOptions.setToolContext(AgentRunContext.toolContext(activeChatId));
+        }
     }
 
     @Override

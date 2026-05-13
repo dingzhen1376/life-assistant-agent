@@ -169,9 +169,9 @@ public abstract class BaseAgent {
             this.chatId = null;
             this.cleanupExecuted = false;
             this.messageList = new ArrayList<>();
-            AgentRunContext.clear();
         }
     }
+
 
     private void cleanupIntermediateToolMessagesIfNecessary() {
         if (cleanupExecuted) {

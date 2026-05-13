@@ -4,6 +4,7 @@ import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.agent.AgentCoordinator;
 import com.yupi.lifeassistant.agent.AgentRegistry;
 import com.yupi.lifeassistant.agent.AgentRunContext;
+import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
@@ -44,9 +45,10 @@ public class AgentDelegationTool {
             """)
     public String delegateToAgent(
             @ToolParam(description = "Target worker agent id from listAvailableAgents") String targetAgentId,
-            @ToolParam(description = "Focused task for the worker agent") String task) {
-        // conversationId 来自 ThreadLocal 运行上下文，不暴露给模型作为工具参数。
-        return agentCoordinator.delegateToAgent(requireConversationId(), targetAgentId, task);
+            @ToolParam(description = "Focused task for the worker agent") String task,
+            ToolContext toolContext) {
+        // conversationId 来自运行上下文，不暴露给模型作为工具参数。
+        return agentCoordinator.delegateToAgent(requireConversationId(toolContext), targetAgentId, task);
     }
 
     //通过标签分配任务
@@ -58,13 +60,14 @@ public class AgentDelegationTool {
     public String delegateToAgentsByTags(
             @ToolParam(description = "Comma-separated tags that every selected worker must have") String matchAllTags,
             @ToolParam(description = "Comma-separated tags where at least one must match") String matchSomeTags,
-            @ToolParam(description = "Focused task for selected worker agents") String task) {
-        return agentCoordinator.delegateToAgentsByTags(requireConversationId(),
+            @ToolParam(description = "Focused task for selected worker agents") String task,
+            ToolContext toolContext) {
+        return agentCoordinator.delegateToAgentsByTags(requireConversationId(toolContext),
                 parseTags(matchAllTags), parseTags(matchSomeTags), task);
     }
 
-    private String requireConversationId() {
-        String conversationId = AgentRunContext.getChatId();
+    private String requireConversationId(ToolContext toolContext) {
+        String conversationId = AgentRunContext.getChatId(toolContext);
         if (StrUtil.isBlank(conversationId)) {
             throw new IllegalStateException("No active conversation id found for agent delegation");
         }
