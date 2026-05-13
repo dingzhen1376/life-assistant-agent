@@ -38,4 +38,4 @@ build/
 
 .env
 
-*.log
+/frontend/nginx-1.30.0/logs
