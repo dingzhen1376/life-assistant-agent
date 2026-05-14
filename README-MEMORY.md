@@ -300,9 +300,12 @@ persona
 human
 preferences
 working
+skills
 ```
 
 Core Memory 每轮都会进入 system prompt，并且不随单次对话切换；例如 `life-planner` 的 core memory 会在该 Agent 的所有对话中复用。
+
+`skills` 是系统自动维护的 core memory block，只保存 skill 的 `name + description`。这样模型每轮都知道可用 skill，但完整 `SKILL.md` 内容不会常驻上下文，需要时再通过 `readSkill(skillId)` 加载。
 
 ### 6.2 Recall Memory
 
@@ -350,10 +353,10 @@ conversationSearch
 这些工具不要求模型传 `chatId`，而是通过：
 
 ```java
-AgentRunContext.getChatId()
+AgentRunContext.getChatId(toolContext)
 ```
 
-拿当前会话 ID。
+从 Spring AI `ToolContext` 拿当前会话 ID。
 
 ### `AgentRunContext`
 
@@ -365,8 +368,9 @@ src/main/java/com/yupi/lifeassistant/agent/AgentRunContext.java
 
 作用：
 
-- 使用 `ThreadLocal` 保存当前请求的 `chatId`。
-- 让工具调用时能自动知道当前属于哪个会话。
+- 定义写入 `ToolContext` 的 chatId key。
+- 保留 `ThreadLocal` 作为同线程运行链的兼容兜底。
+- 让工具调用时能自动知道当前属于哪个会话，而不需要模型显式传 `chatId`。
 
 ## 8. 看工具注册
 
@@ -406,7 +410,7 @@ new LifeMemoryTool(lifeMemoryService)
   -> ChatMemoryCompressAgent.compress()
   -> 返回 rolling summary + FIFO 队尾消息
   -> 模型决定直接回答或调用工具
-  -> 如果调用记忆工具，LifeMemoryTool 通过 AgentRunContext 获取 chatId
+  -> 如果调用记忆工具，LifeMemoryTool 通过 ToolContext 获取 chatId
   -> 最终自然语言结果返回前端
   -> BaseAgent.cleanup()
 ```
@@ -481,6 +485,7 @@ PGVector 中的长期向量记忆表。
 | Letta 概念 | 本项目实现 |
 | --- | --- |
 | Core Memory / Memory Blocks | `LifeMemoryService.renderCoreMemory()` + Redis Hash |
+| Skills Memory Block | Core memory `[skills]` block + `AgentSkillRepository.renderCoreMemorySkillBlock()` |
 | Recall Memory | `RedisChatMemoryRepository` + `conversationSearch` |
 | Archival Memory | `life_archival_memory` PGVector 表 |
 | FIFO Queue | `ContextQueueManager.enqueue()` 保存完整队列 |

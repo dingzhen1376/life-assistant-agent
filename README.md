@@ -172,7 +172,9 @@ src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
 
 ## Skill 系统
 
-项目新增了一个 Letta-style skill 层，用来把可复用的 Agent 操作规范沉淀成独立 `SKILL.md` 文件，而不是全部塞进 system prompt。Agent 可以通过工具按需查看 skill 清单、检索相关 skill，并读取完整规则。
+项目新增了一个 Letta-style skill 层，用来把可复用的 Agent 操作规范沉淀成独立 `SKILL.md` 文件。
+
+当前实现会把 skill 的 `name + description` 自动写入 core memory 的 `[skills]` block。这样模型每轮都知道自己有哪些 skill，不需要先调用工具查询目录；完整 `SKILL.md` 内容仍然不会常驻 prompt，只有真正需要时才通过 `readSkill(skillId)` 加载。
 
 代码位置：
 
@@ -198,11 +200,11 @@ src/main/resources/skills/{skillId}/SKILL.md
 
 | skillId | 关注点 |
 | --- | --- |
-| `memory-engineering` | core / archival / shared memory 写入策略、去重、压缩、冲突处理 |
-| `multi-agent-delegation` | 任务拆分、worker 选择、同步等待、广播、结果合成 |
-| `agent-to-agent-protocol` | task_id、priority、deadline、expected_output、状态、handoff、retry/escalation |
-| `tool-use-safety` | 工具调用风险检查、写操作确认、secret、外部 API 重试、sandbox/permission |
-| `agent-evaluation` | 约束遵守、memory 使用、worker 选择、幻觉风险、research/reviewer 判断 |
+| `memory-engineering` | Memory write, search, dedupe, compression, and conflict rules. |
+| `multi-agent-delegation` | Supervisor-worker task routing and result synthesis rules. |
+| `agent-to-agent-protocol` | Agent message schema, task status, handoff, retry, and escalation. |
+| `tool-use-safety` | Tool risk checks, permissions, secrets, retries, and destructive actions. |
+| `agent-evaluation` | Final quality review for constraints, memory, delegation, and hallucination risk. |
 
 调用方式：
 
@@ -212,10 +214,15 @@ findRelevantSkills(String query, int limit)
 readSkill(String skillId)
 ```
 
+其中 `listAvailableSkills` 和 `findRelevantSkills` 仍保留为工具能力，但常规情况下模型可以直接根据 `[skills]` block 选择 `readSkill(skillId)`。
+
 设计取舍：
 
 - `SKILL.md` 保持为资源文件，便于像 Letta 官方 skill 仓库一样独立维护。
-- system prompt 只提示“可以使用 skill 工具”，不会默认注入所有 skill 全文，避免污染上下文。
+- core memory 的 `[skills]` block 只保存 skill 名称和简短 description，不保存完整正文。
+- `[skills]` block 由系统自动维护，模型不能通过 memory 工具覆盖。
+- `AgentSkillRepository` 启动时动态扫描 `classpath*:skills/*/SKILL.md`，新增 skill 目录不需要改 Java 常量。
+- system prompt 不默认注入所有 skill 全文，避免污染上下文。
 - `findRelevantSkills` 使用轻量关键词检索，因为当前 skill 数量少且都是人工维护。
 - `SkillTool` 同时注册到 `workerTools` 和 `supervisorTools`，worker 和 supervisor 都可以按需读取操作规范。
 
@@ -267,7 +274,10 @@ persona
 human
 preferences
 working
+skills
 ```
+
+其中 `skills` 是系统自动维护的 block，内容来自 `src/main/resources/skills/*/SKILL.md` 的 `name` 和 `description`，用于让模型每轮知道可用 skill。完整 skill 内容仍通过 `readSkill(skillId)` 按需读取。
 
 ### Recall Memory
 
@@ -305,7 +315,7 @@ LettaChatMemory
 System Prompt
 + Dynamic Agent Catalog(supervisor only)
 + Shared Memory Blocks
-+ Private Core Memory Blocks
++ Private Core Memory Blocks (including skills index)
 + Compressed Recall Summary
 + FIFO active messages
 + Current UserPrompt
@@ -500,7 +510,7 @@ life-assistant-agent
 - worker 结果既作为 tool result 返回给 supervisor，也写入 shared memory。
 - Redis 保留完整对话历史，进入模型上下文的是 FIFO active window + compressed summary。
 - PGVector 分成 RAG 知识库和 archival memory 两张表，避免职责混杂。
-- Skill 使用 `SKILL.md` 资源文件加工具按需读取，不把全部规则长期压进 prompt。
+- Skill 使用 `SKILL.md` 资源文件加 core memory 索引；每轮只暴露名称和简述，完整规则按需读取。
 - 前端只负责 chatId、SSE 展示和本地 thread 状态；core memory 是 Agent 级长期状态，不随单个对话删除。
 
 后续如果要继续增强，可以考虑：

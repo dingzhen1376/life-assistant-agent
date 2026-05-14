@@ -1,6 +1,6 @@
 ---
 name: memory-engineering
-description: Use when deciding how to write core memory, archival memory, shared memory, duplicate checks, compression, and state blocks.
+description: Memory write, search, dedupe, compression, and conflict rules.
 tags: memory,letta,core-memory,archival-memory,shared-memory
 ---
 

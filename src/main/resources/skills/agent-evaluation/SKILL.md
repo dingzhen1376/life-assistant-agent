@@ -1,6 +1,6 @@
 ---
 name: agent-evaluation
-description: Use to review whether an agent followed constraints, used memory correctly, delegated appropriately, avoided hallucinations, and needs research or reviewer agents.
+description: Final quality review for constraints, memory, delegation, and hallucination risk.
 tags: evaluation,review,quality,hallucination,research
 ---
 

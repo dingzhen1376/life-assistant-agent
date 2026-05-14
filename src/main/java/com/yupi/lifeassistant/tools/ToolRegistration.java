@@ -3,7 +3,6 @@ package com.yupi.lifeassistant.tools;
 import com.yupi.lifeassistant.agent.TerminateTool;
 import com.yupi.lifeassistant.constant.FileConstant;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
-import com.yupi.lifeassistant.skill.SkillTool;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Value;

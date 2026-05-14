@@ -1,6 +1,6 @@
 ---
 name: agent-to-agent-protocol
-description: Use when defining messages, task status, handoff summaries, retry rules, and escalation between agents.
+description: Agent message schema, task status, handoff, retry, and escalation.
 tags: protocol,agent-to-agent,task-status,handoff,retry
 ---
 

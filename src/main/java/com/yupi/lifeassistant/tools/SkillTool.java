@@ -1,5 +1,7 @@
-package com.yupi.lifeassistant.skill;
+package com.yupi.lifeassistant.tools;
 
+import com.yupi.lifeassistant.skill.AgentSkill;
+import com.yupi.lifeassistant.skill.AgentSkillRepository;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;

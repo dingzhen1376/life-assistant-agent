@@ -1,6 +1,6 @@
 ---
 name: tool-use-safety
-description: Use before risky tool calls, writes, external API calls, destructive actions, permission-sensitive work, and secret handling.
+description: Tool risk checks, permissions, secrets, retries, and destructive actions.
 tags: tools,safety,permissions,secrets,retry,sandbox
 ---
 

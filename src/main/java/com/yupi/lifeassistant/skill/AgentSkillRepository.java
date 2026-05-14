@@ -1,11 +1,15 @@
 package com.yupi.lifeassistant.skill;
 
 import cn.hutool.core.util.StrUtil;
-import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.net.URLDecoder;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -22,14 +26,7 @@ import java.util.Map;
 @Component
 public class AgentSkillRepository {
 
-    // Keep ids explicit so missing resource files fail fast during application startup.
-    private static final List<String> SKILL_IDS = List.of(
-            "memory-engineering",
-            "multi-agent-delegation",
-            "agent-to-agent-protocol",
-            "tool-use-safety",
-            "agent-evaluation"
-    );
+    private static final String SKILL_RESOURCE_PATTERN = "classpath*:skills/*/SKILL.md";
 
     private final Map<String, AgentSkill> skills;
 
@@ -76,30 +73,83 @@ public class AgentSkillRepository {
         return builder.toString();
     }
 
+    /**
+     * Compact text stored in the core memory "skills" block.
+     *
+     * <p>Only id/name and short descriptions are included here. Full markdown content stays out of
+     * the always-visible prompt and is loaded lazily through readSkill(skillId).
+     */
+    public String renderCoreMemorySkillBlock() {
+        StringBuilder builder = new StringBuilder("""
+                Available skills:
+                Use readSkill(skillId) when detailed rules are needed.
+                """);
+        skills.values().forEach(skill -> builder.append("- ")
+                .append(skill.name())
+                .append(": ")
+                .append(skill.description())
+                .append('\n'));
+        return builder.toString().trim();
+    }
+
     // Startup loading keeps runtime tool calls cheap and makes broken skill resources visible early.
     private static Map<String, AgentSkill> loadSkills() {
         Map<String, AgentSkill> loadedSkills = new LinkedHashMap<>();
-        for (String skillId : SKILL_IDS) {
-            loadedSkills.put(skillId, loadSkill(skillId));
+        for (SkillResource skillResource : resolveSkillResources()) {
+            loadedSkills.put(skillResource.skillId(), loadSkill(skillResource));
         }
         return Collections.unmodifiableMap(loadedSkills);
     }
 
-    private static AgentSkill loadSkill(String skillId) {
-        String resourcePath = "skills/" + skillId + "/SKILL.md";
-        ClassPathResource resource = new ClassPathResource(resourcePath);
+    // Dynamic classpath scanning keeps Java code unchanged when a new resources/skills/{id}/SKILL.md is added.
+    private static List<SkillResource> resolveSkillResources() {
+        ResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
         try {
-            String raw = resource.getContentAsString(StandardCharsets.UTF_8);
+            Resource[] resources = resolver.getResources(SKILL_RESOURCE_PATTERN);
+            List<SkillResource> skillResources = new java.util.ArrayList<>(resources.length);
+            for (Resource resource : resources) {
+                skillResources.add(toSkillResource(resource));
+            }
+            if (skillResources.isEmpty()) {
+                throw new IllegalStateException("No skill resources found by pattern: " + SKILL_RESOURCE_PATTERN);
+            }
+            return skillResources.stream()
+                    .sorted(Comparator.comparing(SkillResource::skillId))
+                    .toList();
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to scan skill resources: " + SKILL_RESOURCE_PATTERN, e);
+        }
+    }
+
+    private static SkillResource toSkillResource(Resource resource) {
+        try {
+            String resourceUrl = resource.getURL().toString().replace('\\', '/');
+            int skillPathIndex = resourceUrl.lastIndexOf("/skills/");
+            int skillIdStart = skillPathIndex + "/skills/".length();
+            int skillIdEnd = resourceUrl.indexOf("/SKILL.md", skillIdStart);
+            if (skillPathIndex < 0 || skillIdEnd <= skillIdStart) {
+                throw new IllegalStateException("Invalid skill resource path: " + resourceUrl);
+            }
+            String skillId = URLDecoder.decode(resourceUrl.substring(skillIdStart, skillIdEnd), StandardCharsets.UTF_8);
+            return new SkillResource(skillId, resource);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to read skill resource URL: " + resource, e);
+        }
+    }
+
+    private static AgentSkill loadSkill(SkillResource skillResource) {
+        try (InputStream inputStream = skillResource.resource().getInputStream()) {
+            String raw = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
             Map<String, String> frontMatter = parseFrontMatter(raw);
             String content = stripFrontMatter(raw);
             return new AgentSkill(
-                    skillId,
-                    frontMatter.getOrDefault("name", skillId),
+                    skillResource.skillId(),
+                    frontMatter.getOrDefault("name", skillResource.skillId()),
                     frontMatter.getOrDefault("description", ""),
                     content.trim()
             );
         } catch (IOException e) {
-            throw new IllegalStateException("Failed to load skill resource: " + resourcePath, e);
+            throw new IllegalStateException("Failed to load skill resource: " + skillResource.resource(), e);
         }
     }
 
@@ -166,11 +216,11 @@ public class AgentSkillRepository {
         return count;
     }
 
-    private static int normalizeLimit(int limit) {
+    private int normalizeLimit(int limit) {
         if (limit <= 0) {
             return 3;
         }
-        return Math.min(limit, SKILL_IDS.size());
+        return Math.min(limit, skills.size());
     }
 
     private static String normalizeSkillId(String skillId) {
@@ -181,5 +231,8 @@ public class AgentSkillRepository {
     }
 
     private record SkillScore(AgentSkill skill, int score) {
+    }
+
+    private record SkillResource(String skillId, Resource resource) {
     }
 }

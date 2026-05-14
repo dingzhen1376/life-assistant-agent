@@ -19,7 +19,7 @@ public class LifeMemoryTool {
     @Tool(description = """
             Insert durable information into a Letta-style core memory block.
             Use for stable user facts, preferences, constraints, routines, or active plans that should stay visible every turn.
-            Common block names: human, preferences, working.
+            Common block names: human, preferences, working. Do not update the system-managed skills block.
             """)
     public String memoryInsert(
             @ToolParam(description = "Core memory block name, for example human, preferences, or working") String blockName,
@@ -31,6 +31,7 @@ public class LifeMemoryTool {
     @Tool(description = """
             Replace an entire Letta-style core memory block.
             Use when an existing stable user fact, preference, or active plan block becomes outdated.
+            Do not replace the system-managed skills block.
             """)
     public String memoryReplace(
             @ToolParam(description = "Core memory block name, for example human, preferences, or working") String blockName,
@@ -42,6 +43,7 @@ public class LifeMemoryTool {
     @Tool(description = """
             Rewrite one Letta-style core memory block from scratch.
             Use sparingly, only when the block has become messy and a cleaner summary is better.
+            Do not rewrite the system-managed skills block.
             """)
     public String memoryRethink(
             @ToolParam(description = "Core memory block name, for example human, preferences, or working") String blockName,

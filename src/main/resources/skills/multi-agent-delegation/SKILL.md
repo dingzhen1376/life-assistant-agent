@@ -1,6 +1,6 @@
 ---
 name: multi-agent-delegation
-description: Use when a supervisor agent must split work, choose worker agents, wait or broadcast, update shared memory, and synthesize worker outputs.
+description: Supervisor-worker task routing and result synthesis rules.
 tags: multi-agent,delegation,supervisor,worker,shared-memory
 ---
 

@@ -2,6 +2,7 @@ package com.yupi.lifeassistant.memory;
 
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
+import com.yupi.lifeassistant.skill.AgentSkillRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.document.Document;
@@ -51,25 +52,31 @@ public class LifeMemoryService {
     private static final String QUEUE_SUMMARY_KEY_PREFIX = "life:memory:queue:summary:";
     private static final String QUEUE_COMPRESSED_COUNT_KEY_PREFIX = "life:memory:queue:compressed-count:";
     private static final String ARCHIVAL_MEMORY_TYPE = "archival";
+    private static final String SKILLS_BLOCK_NAME = "skills";
     private static final int MAX_CORE_BLOCK_CHARS = 4000;
     private static final int MAX_SHARED_BLOCK_CHARS = 12000;
     private static final int ARCHIVAL_CHUNK_CHARS = 3000;
     private static final int ARCHIVAL_CHUNK_OVERLAP_CHARS = 200;
-    private static final List<String> DEFAULT_BLOCK_ORDER = List.of("persona", "human", "preferences", "working");
+    private static final List<String> DEFAULT_BLOCK_ORDER =
+            List.of("persona", "human", "preferences", "working", SKILLS_BLOCK_NAME);
 
     private final StringRedisTemplate stringRedisTemplate;
     private final RedisChatMemoryRepository chatMemoryRepository;
     private final JdbcTemplate jdbcTemplate;
+    private final AgentSkillRepository agentSkillRepository;
     private final VectorStore archivalMemoryStore;
 
     public LifeMemoryService(StringRedisTemplate stringRedisTemplate,
                              JdbcTemplate jdbcTemplate,
-                             EmbeddingModel dashscopeEmbeddingModel) {
+                             EmbeddingModel dashscopeEmbeddingModel,
+                             AgentSkillRepository agentSkillRepository) {
         Assert.notNull(stringRedisTemplate, "stringRedisTemplate cannot be null");
         Assert.notNull(jdbcTemplate, "jdbcTemplate cannot be null");
         Assert.notNull(dashscopeEmbeddingModel, "dashscopeEmbeddingModel cannot be null");
+        Assert.notNull(agentSkillRepository, "agentSkillRepository cannot be null");
         this.stringRedisTemplate = stringRedisTemplate;
         this.jdbcTemplate = jdbcTemplate;
+        this.agentSkillRepository = agentSkillRepository;
         this.chatMemoryRepository = RedisChatMemoryRepository.builder()
                 .stringRedisTemplate(stringRedisTemplate)
                 .build();
@@ -95,6 +102,7 @@ public class LifeMemoryService {
                 - Treat these blocks as durable user and agent memory for this conversation.
                 - Update them with memory tools only when the user reveals stable preferences, routines, constraints, or active plans.
                 - Keep ephemeral tool observations out of core memory; use archival memory for details that should be saved but do not need to stay in every prompt.
+                - The [skills] block is system-managed. It lists available skills by name and description; load full rules with readSkill(skillId).
                 """);
         for (Map.Entry<String, String> entry : blocks.entrySet()) {
             builder.append("\n[").append(entry.getKey()).append("]\n");
@@ -185,6 +193,9 @@ public class LifeMemoryService {
     public String insertCoreMemory(String chatId, String blockName, String content) {
         //规范化 block name 和 content
         String normalizedBlockName = normalizeBlockName(blockName);
+        if (isManagedCoreBlock(normalizedBlockName)) {
+            return managedCoreBlockMessage(normalizedBlockName);
+        }
         String normalizedContent = normalizeContent(content, "content");
         String key = getCoreMemoryKey(chatId);
         //初始化 core memory
@@ -234,6 +245,9 @@ public class LifeMemoryService {
     // 更新整个 core memory block，避免让模型传 exact oldText 带来的匹配不稳定。
     public String replaceCoreMemory(String chatId, String blockName, String newText) {
         String normalizedBlockName = normalizeBlockName(blockName);
+        if (isManagedCoreBlock(normalizedBlockName)) {
+            return managedCoreBlockMessage(normalizedBlockName);
+        }
         String normalizedNewText = normalizeContent(newText, "newText");
         String key = getCoreMemoryKey(chatId);
         initializeCoreMemory(chatId);
@@ -246,6 +260,9 @@ public class LifeMemoryService {
     //重写一个block块
     public String rethinkCoreMemory(String chatId, String blockName, String content) {
         String normalizedBlockName = normalizeBlockName(blockName);
+        if (isManagedCoreBlock(normalizedBlockName)) {
+            return managedCoreBlockMessage(normalizedBlockName);
+        }
         String normalizedContent = normalizeContent(content, "content");
         validateCoreBlockSize(normalizedBlockName, normalizedContent);
         initializeCoreMemory(chatId);
@@ -384,6 +401,9 @@ public class LifeMemoryService {
                 "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "working",
                 "");
+        // The skills block is generated from SKILL.md metadata and refreshed on every initialization.
+        // This keeps the model aware of available skills without keeping full skill content in the prompt.
+        stringRedisTemplate.opsForHash().put(key, SKILLS_BLOCK_NAME, agentSkillRepository.renderCoreMemorySkillBlock());
     }
 
     private int deleteArchivalMemoryRows(Set<String> conversationIds) {
@@ -489,6 +509,15 @@ public class LifeMemoryService {
             throw new IllegalArgumentException("Invalid memory block name: " + blockName);
         }
         return normalized;
+    }
+
+    private static boolean isManagedCoreBlock(String blockName) {
+        return SKILLS_BLOCK_NAME.equals(blockName);
+    }
+
+    private static String managedCoreBlockMessage(String blockName) {
+        return "Core memory block '%s' is system-managed; use readSkill(skillId) for full skill content."
+                .formatted(blockName);
     }
 
     private static String normalizeContent(String content, String fieldName) {
