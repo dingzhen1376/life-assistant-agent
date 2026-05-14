@@ -275,7 +275,9 @@ public class AgentRegistry {
                 2. For complex requests, break work into clear subtasks and finish with an actionable Chinese answer.
                 3. Prefer concrete outputs over vague suggestions.
                 4. Never fabricate tool results. If a tool fails, explain the failure and give the best fallback.
-                5. When the task is complete, call the terminate tool.
+                5. Use listAvailableSkills, findRelevantSkills, and readSkill when you need reusable operating guidance
+                   for memory engineering, multi-agent delegation, agent-to-agent protocol, tool safety, or evaluation.
+                6. When the task is complete, call the terminate tool.
 
                 Memory policy inspired by Letta:
                 1. You are one stateful agent among multiple agents. Your private memory is isolated by agentId and chatId.

@@ -8,6 +8,7 @@
 - 静态前端页面：`frontend`
 - Nginx 本地代理配置：`frontend/nginx.conf`、`frontend/start-nginx.ps1`
 - 生活知识 RAG 文档：`src/main/resources/document`
+- Letta-style Skill 资源：`src/main/resources/skills`
 - 记忆管理说明：`README-MEMORY.md`
 - 多 Agent 说明：`README-MULTI-AGENT.md`
 
@@ -135,7 +136,7 @@ src/main/java/com/yupi/lifeassistant/agent
 | `LifeManusAgent` | 按 `AgentProfile` 装配具体运行实例 |
 | `AgentRegistry` | 管理 supervisor / worker 静态身份 |
 | `AgentCoordinator` | 执行 supervisor-worker 委派 |
-| `AgentRunContext` | 用 `ThreadLocal` 让工具拿到当前 conversationId |
+| `AgentRunContext` | 为工具调用提供 `ToolContext` 上下文 key，保留 `ThreadLocal` 兜底 |
 | `ChatMemoryCompressAgent` | Letta 风格上下文压缩 |
 
 当前输出策略是：中间 step 和工具结果主要用于后端日志和调试，用户看到的是最终自然语言回答。
@@ -157,6 +158,7 @@ src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
 | `LifePlannerTool` | 生成日程、饮食、穿搭、出行清单 |
 | `TodoArchiveTool` | 待办归档 |
 | `BudgetTool` | 预算统计 |
+| `SkillTool` | Letta-style skill 列表、检索和读取 |
 | `LifeMemoryTool` | core / shared / archival / conversation memory |
 | `AgentDelegationTool` | supervisor 专用的 Agent-to-Agent 工具 |
 | `TerminateTool` | 结束 Agent 任务 |
@@ -167,6 +169,55 @@ src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
 | --- | --- | --- |
 | `workerTools` | worker agents | 不包含 `AgentDelegationTool` |
 | `supervisorTools` | supervisor agent | 包含 `AgentDelegationTool` |
+
+## Skill 系统
+
+项目新增了一个 Letta-style skill 层，用来把可复用的 Agent 操作规范沉淀成独立 `SKILL.md` 文件，而不是全部塞进 system prompt。Agent 可以通过工具按需查看 skill 清单、检索相关 skill，并读取完整规则。
+
+代码位置：
+
+```text
+src/main/java/com/yupi/lifeassistant/skill
+```
+
+资源位置：
+
+```text
+src/main/resources/skills/{skillId}/SKILL.md
+```
+
+核心类：
+
+| 类 | 职责 |
+| --- | --- |
+| `AgentSkill` | 运行时的 skill 数据结构 |
+| `AgentSkillRepository` | 启动时加载 `SKILL.md`，解析 frontmatter，提供简单相关性检索 |
+| `SkillTool` | 暴露 `listAvailableSkills`、`findRelevantSkills`、`readSkill` 给 Agent 调用 |
+
+当前内置 skill：
+
+| skillId | 关注点 |
+| --- | --- |
+| `memory-engineering` | core / archival / shared memory 写入策略、去重、压缩、冲突处理 |
+| `multi-agent-delegation` | 任务拆分、worker 选择、同步等待、广播、结果合成 |
+| `agent-to-agent-protocol` | task_id、priority、deadline、expected_output、状态、handoff、retry/escalation |
+| `tool-use-safety` | 工具调用风险检查、写操作确认、secret、外部 API 重试、sandbox/permission |
+| `agent-evaluation` | 约束遵守、memory 使用、worker 选择、幻觉风险、research/reviewer 判断 |
+
+调用方式：
+
+```text
+listAvailableSkills()
+findRelevantSkills(String query, int limit)
+readSkill(String skillId)
+```
+
+设计取舍：
+
+- `SKILL.md` 保持为资源文件，便于像 Letta 官方 skill 仓库一样独立维护。
+- system prompt 只提示“可以使用 skill 工具”，不会默认注入所有 skill 全文，避免污染上下文。
+- `findRelevantSkills` 使用轻量关键词检索，因为当前 skill 数量少且都是人工维护。
+- `SkillTool` 同时注册到 `workerTools` 和 `supervisorTools`，worker 和 supervisor 都可以按需读取操作规范。
 
 ## 记忆与上下文管理
 
@@ -368,49 +419,6 @@ GET /api/ai/life/chat/sse?message=帮我查资料并制定计划&chatId=abc&agen
 GET /api/ai/life/chat?message=帮我列一个出行清单&chatId=abc&agentId=life-planner
 ```
 
-## 配置项
-
-主要配置文件：
-
-```text
-src/main/resources/application.yml
-```
-
-关键配置：
-
-```yaml
-spring:
-  ai:
-    dashscope:
-      api-key: ${ai.my-api-key}
-      chat:
-        options:
-          model: qwen-plus-2025-07-28
-  datasource:
-    url: jdbc:postgresql://${docker.localhost}:5432/life_assistant_agent
-    username: postgres
-    password: ${pgsql.password}
-  data:
-    redis:
-      host: ${docker.localhost}
-      port: 6379
-
-life-assistant:
-  workspace: ${LIFE_ASSISTANT_WORKSPACE:D:/codex/life-assistant-agent/tmp}
-  vectorstore:
-    auto-init: true
-    force-reinit: false
-```
-
-环境变量 / 占位符含义：
-
-| 配置 | 说明 |
-| --- | --- |
-| `ai.my-api-key` | DashScope API Key |
-| `docker.localhost` | 本机或 Docker 场景下的主机地址 |
-| `pgsql.password` | PostgreSQL 密码 |
-| `LIFE_ASSISTANT_WORKSPACE` | Agent 文件工具工作区 |
-
 ## 项目结构
 
 ```text
@@ -426,10 +434,12 @@ life-assistant-agent
 │  ├─ controller
 │  ├─ memory
 │  ├─ rag
+│  ├─ skill
 │  └─ tools
 ├─ src/main/resources
 │  ├─ application.yml
-│  └─ document
+│  ├─ document
+│  └─ skills
 ├─ README-MEMORY.md
 ├─ README-MULTI-AGENT.md
 └─ pom.xml
@@ -472,6 +482,16 @@ life-assistant-agent
 5. ToolRegistration
 ```
 
+如果想理解 Skill 系统：
+
+```text
+1. README.md 的 Skill 系统章节
+2. src/main/resources/skills/*/SKILL.md
+3. AgentSkillRepository
+4. SkillTool
+5. ToolRegistration
+```
+
 ## 当前设计取舍
 
 当前实现优先保证流程清晰和可调试：
@@ -480,6 +500,7 @@ life-assistant-agent
 - worker 结果既作为 tool result 返回给 supervisor，也写入 shared memory。
 - Redis 保留完整对话历史，进入模型上下文的是 FIFO active window + compressed summary。
 - PGVector 分成 RAG 知识库和 archival memory 两张表，避免职责混杂。
+- Skill 使用 `SKILL.md` 资源文件加工具按需读取，不把全部规则长期压进 prompt。
 - 前端只负责 chatId、SSE 展示和本地 thread 状态；core memory 是 Agent 级长期状态，不随单个对话删除。
 
 后续如果要继续增强，可以考虑：
