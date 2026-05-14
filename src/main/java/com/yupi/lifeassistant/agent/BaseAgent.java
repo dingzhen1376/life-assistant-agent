@@ -65,8 +65,12 @@ public abstract class BaseAgent {
     }
 
     public SseEmitter runStream(String userPrompt, String chatId) {
+        return runStream(userPrompt, chatId, null);
+    }
+
+    public SseEmitter runStream(String userPrompt, String chatId, Runnable completionCallback) {
         SseEmitter emitter = new SseEmitter(300_000L);
-        CompletableFuture.runAsync(() -> runStreamInternal(userPrompt, chatId, emitter));
+        CompletableFuture.runAsync(() -> runStreamInternal(userPrompt, chatId, emitter, completionCallback));
         emitter.onTimeout(() -> {
             this.state = AgentState.ERROR;
             cleanup();
@@ -81,7 +85,8 @@ public abstract class BaseAgent {
         return emitter;
     }
 
-    private void runStreamInternal(String userPrompt, String chatId, SseEmitter emitter) {
+    private void runStreamInternal(String userPrompt, String chatId, SseEmitter emitter, Runnable completionCallback) {
+        boolean completedSuccessfully = false;
         try {
             validateBeforeRun(userPrompt);
             this.chatId = normalizeChatId(chatId);
@@ -100,6 +105,7 @@ public abstract class BaseAgent {
                 log.warn("{} stream terminated because it reached max steps ({})", name, maxSteps);
             }
             emitter.send(getUserVisibleResponse());
+            completedSuccessfully = true;
             emitter.complete();
         } catch (Exception e) {
             state = AgentState.ERROR;
@@ -112,6 +118,17 @@ public abstract class BaseAgent {
             }
         } finally {
             cleanup();
+            if (completedSuccessfully && completionCallback != null) {
+                runCompletionCallback(completionCallback);
+            }
+        }
+    }
+
+    private void runCompletionCallback(Runnable completionCallback) {
+        try {
+            completionCallback.run();
+        } catch (Exception e) {
+            log.warn("{} stream completion callback failed", name, e);
         }
     }
 

@@ -50,6 +50,11 @@ knife4j:
 
 life-assistant:
   workspace: ${LIFE_ASSISTANT_WORKSPACE:D:/codex/life-assistant-agent/tmp}
+  memory:
+    sleeptime:
+      trigger-user-messages: 20 # supervisor 每新增 20 条外部用户消息后触发一次后台记忆整理
+      recent-message-limit: 40 # 每次整理只读取最近一段 supervisor 对话，避免把完整历史塞给压缩 Agent
+      lock-minutes: 10 # Redis 分布式锁过期时间，防止同一 supervisor 会话重复整理
   vectorstore:
     auto-init: true # 启用自动同步（推荐常驻）
     force-reinit: false # 默认false，需要全量重刷时临时改为true

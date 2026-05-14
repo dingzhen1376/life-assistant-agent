@@ -273,6 +273,47 @@ life-assistant:
 
 如果模型压缩失败，会走 `fallbackSummary(...)`，避免整个对话因为压缩失败而中断。
 
+### 5.1 Supervisor Sleep-time Memory Agent
+
+路径：
+
+```text
+src/main/java/com/yupi/lifeassistant/agent/SupervisorSleepTimeMemoryAgent.java
+```
+
+这是仿照 Letta Sleep-time Agent 增加的后台记忆编辑器。它不参与前台 ReAct loop，也不会把整理过程流式输出给用户，而是在 supervisor 对话完成后异步运行。
+
+触发链路：
+
+```text
+LifeAssistantApp.chat / chatStream
+  -> 判断当前 profile 是否是 supervisor
+  -> SupervisorSleepTimeMemoryAgent.onSupervisorConversationCompleted(...)
+  -> Redis INCR 记录 supervisor 用户消息累计数
+  -> 每达到 trigger-user-messages 阈值才启动后台任务
+  -> 读取最近 supervisor 对话 + 当前 supervisor core memory
+  -> 模型返回 JSON 更新决策
+  -> LifeMemoryService.replaceCoreMemory(...) 写回 core memory
+```
+
+默认策略：
+
+```yaml
+life-assistant:
+  memory:
+    sleeptime:
+      trigger-user-messages: 20
+      recent-message-limit: 80
+      lock-minutes: 10
+```
+
+注意点：
+
+- 它只处理 `life-coordinator:{chatId}` 形式的 supervisor conversationId。
+- Redis 计数发生在前台对话完成之后；真正的记忆整理通过 `CompletableFuture.runAsync(...)` 后台执行。
+- 更新前会先读取旧 core memory，并让模型判断是否真的需要改，避免每 20 条消息机械写入。
+- 只允许更新 `persona`、`human`、`preferences`、`working`，`skills` block 仍由系统自动维护。
+
 ## 6. 看三层记忆服务
 
 ### `LifeMemoryService`
@@ -475,6 +516,18 @@ life:memory:queue:compressed-count:{chatId}
 已经被压缩移出活跃上下文的消息数量。
 
 ```text
+life:memory:sleeptime:user-count:{life-coordinator}:{chatId}
+```
+
+Supervisor Sleep-time Agent 的用户消息累计计数。
+
+```text
+life:memory:sleeptime:lock:{life-coordinator}:{chatId}
+```
+
+Supervisor Sleep-time Agent 的后台整理锁，防止同一会话并发整理。
+
+```text
 life_archival_memory
 ```
 
@@ -491,6 +544,7 @@ PGVector 中的长期向量记忆表。
 | FIFO Queue | `ContextQueueManager.enqueue()` 保存完整队列 |
 | Queue Manager | `ContextQueueManager.buildContext()` |
 | Context Compression | `ChatMemoryCompressAgent.compress()` |
+| Sleep-time Agent | `SupervisorSleepTimeMemoryAgent` 异步整理 supervisor core memory |
 | Memory Tools | `LifeMemoryTool` |
 | Per-agent state isolation | `agentId` for Core Memory, `agentId:chatId` for recall/FIFO context |
 
@@ -507,12 +561,13 @@ PGVector 中的长期向量记忆表。
 6. LettaChatMemory
 7. ContextQueueManager
 8. ChatMemoryCompressAgent
-9. LifeMemoryService
-10. LifeMemoryTool
-11. AgentRunContext
-12. ToolRegistration
-13. RedisChatMemoryRepository
-14. RetrievalAugmentAdvisorPlus / PgVectorStoreConfig
+9. SupervisorSleepTimeMemoryAgent
+10. LifeMemoryService
+11. LifeMemoryTool
+12. AgentRunContext
+13. ToolRegistration
+14. RedisChatMemoryRepository
+15. RetrievalAugmentAdvisorPlus / PgVectorStoreConfig
 ```
 
-前 8 个文件负责 Letta 风格上下文管理主链路；后面的文件负责记忆工具、持久化和 RAG 的外围能力。
+前 9 个文件负责 Letta 风格上下文管理和 sleep-time 后台学习主链路；后面的文件负责记忆工具、持久化和 RAG 的外围能力。

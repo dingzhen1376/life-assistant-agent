@@ -3,6 +3,7 @@ package com.yupi.lifeassistant.app;
 import com.yupi.lifeassistant.agent.ChatMemoryCompressAgent;
 import com.yupi.lifeassistant.agent.AgentRegistry;
 import com.yupi.lifeassistant.agent.LifeManusAgent;
+import com.yupi.lifeassistant.agent.SupervisorSleepTimeMemoryAgent;
 import com.yupi.lifeassistant.agent.model.AgentProfile;
 import com.yupi.lifeassistant.agent.model.AgentSummary;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
@@ -44,6 +45,9 @@ public class LifeAssistantApp {
     @Resource
     private AgentRegistry agentRegistry;
 
+    @Resource
+    private SupervisorSleepTimeMemoryAgent supervisorSleepTimeMemoryAgent;
+
     public List<AgentSummary> listAgents() {
         return agentRegistry.listAgents();
     }
@@ -64,7 +68,9 @@ public class LifeAssistantApp {
         AgentProfile profile = agentRegistry.getProfile(agentId);
         // 外部传入的是 root chatId；内部追加 agentId，隔离不同 Agent 的 private memory。
         String conversationId = agentRegistry.buildConversationId(profile.id(), chatId);
-        return createAgent(profile).run(message, conversationId);
+        String response = createAgent(profile).run(message, conversationId);
+        triggerSupervisorSleepTimeIfNecessary(profile, conversationId);
+        return response;
     }
 
     public SseEmitter chatStream(String message, String chatId) {
@@ -75,7 +81,17 @@ public class LifeAssistantApp {
         AgentProfile profile = agentRegistry.getProfile(agentId);
         // SSE 与普通 chat 使用同一套 conversationId 规则，保证 Redis 记忆命名一致。
         String conversationId = agentRegistry.buildConversationId(profile.id(), chatId);
-        return createAgent(profile).runStream(message, conversationId);
+        // SSE 请求返回时前台仍在运行；完成回调由 BaseAgent 的异步执行线程在真正结束后触发。
+        Runnable completionCallback = profile.supervisor()
+                ? () -> supervisorSleepTimeMemoryAgent.onSupervisorConversationCompleted(conversationId)
+                : null;
+        return createAgent(profile).runStream(message, conversationId, completionCallback);
+    }
+
+    private void triggerSupervisorSleepTimeIfNecessary(AgentProfile profile, String conversationId) {
+        if (profile.supervisor()) {
+            supervisorSleepTimeMemoryAgent.onSupervisorConversationCompleted(conversationId);
+        }
     }
 
     private LifeManusAgent createAgent(AgentProfile profile) {

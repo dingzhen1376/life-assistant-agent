@@ -138,6 +138,7 @@ src/main/java/com/yupi/lifeassistant/agent
 | `AgentCoordinator` | 执行 supervisor-worker 委派 |
 | `AgentRunContext` | 为工具调用提供 `ToolContext` 上下文 key，保留 `ThreadLocal` 兜底 |
 | `ChatMemoryCompressAgent` | Letta 风格上下文压缩 |
+| `SupervisorSleepTimeMemoryAgent` | Letta 风格后台记忆编辑器，异步更新 supervisor 的 core memory |
 
 当前输出策略是：中间 step 和工具结果主要用于后端日志和调试，用户看到的是最终自然语言回答。
 
@@ -278,6 +279,35 @@ skills
 ```
 
 其中 `skills` 是系统自动维护的 block，内容来自 `src/main/resources/skills/*/SKILL.md` 的 `name` 和 `description`，用于让模型每轮知道可用 skill。完整 skill 内容仍通过 `readSkill(skillId)` 按需读取。
+
+### Supervisor Sleep-time Memory
+
+项目新增了一个仿 Letta Sleep-time Agent 的后台记忆编辑器：
+
+```text
+LifeAssistantApp
+  -> SupervisorSleepTimeMemoryAgent
+  -> Redis 计数 / 锁
+  -> 读取最近 supervisor 对话
+  -> 读取旧 core memory
+  -> DashScope 判断是否需要更新
+  -> LifeMemoryService.replaceCoreMemory(...)
+```
+
+它只针对 `life-coordinator` 这个 supervisor 生效。前台对话完成后只做一次轻量 Redis 计数；当用户累计新增 `20` 条消息时，后台异步启动记忆整理，不阻塞 SSE 输出和普通对话返回。
+
+默认配置：
+
+```yaml
+life-assistant:
+  memory:
+    sleeptime:
+      trigger-user-messages: 20
+      recent-message-limit: 80
+      lock-minutes: 10
+```
+
+更新范围只允许 `persona`、`human`、`preferences`、`working`，不会覆盖系统维护的 `skills` block。
 
 ### Recall Memory
 
@@ -479,7 +509,8 @@ life-assistant-agent
 3. LettaChatMemory
 4. ContextQueueManager
 5. ChatMemoryCompressAgent
-6. RedisChatMemoryRepository
+6. SupervisorSleepTimeMemoryAgent
+7. RedisChatMemoryRepository
 ```
 
 如果想理解多 Agent：
