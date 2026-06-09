@@ -63,6 +63,17 @@ Respect sandbox boundaries:
 - Keep escalation scope narrow.
 - Do not request broad permission for destructive actions.
 
+Runtime permission modes:
+
+- `default`: every non-terminate tool call requires confirmation.
+- `accept-edits`: read-only, computation, and file edit tools are allowed; memory writes, delegation, code execution, and unknown tools still require confirmation.
+- `plan`: read-only mode; side-effecting tools are blocked.
+- `bypass` / `yolo`: most tools are allowed automatically, but tool-local guardrails such as sandboxing, workspace path checks, SSRF blocking, and secret scrubbing still apply.
+
+When a tool returns `TOOL_PERMISSION_REQUIRED` or `TOOL_BLOCKED_BY_SAFETY_POLICY`, do not fabricate the tool result. Explain what permission is needed or continue with a read-only plan.
+
+Use `runCode` only for small, harmless Java snippets. Do not use it for file access, network calls, shell/process execution, credential discovery, or long-running code.
+
 ## Destructive Actions
 
 Destructive actions require explicit user confirmation unless the user already gave a clear, specific delete/overwrite instruction.

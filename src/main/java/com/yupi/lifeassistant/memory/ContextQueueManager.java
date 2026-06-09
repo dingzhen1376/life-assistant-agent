@@ -34,7 +34,9 @@ public class ContextQueueManager {
         }
 
         // FIFO 入队：新消息始终追加到完整 Redis 历史末尾，不在这里裁剪。
-        List<Message> allMessages = new ArrayList<>(chatMemoryRepository.findByConversationId(conversationId));
+        // 写入队列时必须读取原始历史，保留刚落库的 tool_call / tool_response。
+        // 构建模型上下文时才过滤这些内部工具痕迹。
+        List<Message> allMessages = new ArrayList<>(chatMemoryRepository.findRawByConversationId(conversationId));
         allMessages.addAll(messages);
         chatMemoryRepository.saveAll(conversationId, allMessages);
     }

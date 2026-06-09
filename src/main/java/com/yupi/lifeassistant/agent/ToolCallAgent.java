@@ -4,6 +4,8 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.yupi.lifeassistant.agent.model.AgentState;
+import com.yupi.lifeassistant.safety.SecretManager;
+import com.yupi.lifeassistant.safety.ToolTraceSanitizer;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.extern.slf4j.Slf4j;
@@ -33,9 +35,15 @@ public class ToolCallAgent extends ReActAgent {
     private ChatResponse toolCallChatResponse;
     private String finalResponse;
     private String lastToolResultSummary;
+    private final SecretManager secretManager;
 
     public ToolCallAgent(ToolCallback[] availableTools) {
+        this(availableTools, null);
+    }
+
+    public ToolCallAgent(ToolCallback[] availableTools, SecretManager secretManager) {
         this.availableTools = availableTools;
+        this.secretManager = secretManager;
         this.toolCallingManager = ToolCallingManager.builder().build();
         this.chatOptions = DashScopeChatOptions.builder()
                 .withInternalToolExecutionEnabled(false)
@@ -59,16 +67,16 @@ public class ToolCallAgent extends ReActAgent {
             this.toolCallChatResponse = chatResponse;
             AssistantMessage assistantMessage = chatResponse.getResult().getOutput();
             List<AssistantMessage.ToolCall> toolCalls = assistantMessage.getToolCalls();
-            this.finalResponse = assistantMessage.getText();
+            this.finalResponse = sanitizeUserVisibleText(assistantMessage.getText());
 
             log.info("{} thought: {}", getName(), finalResponse);
             log.info("{} selected {} tool(s)", getName(), toolCalls.size());
-            log.info(toolCalls.stream()
+            log.info(scrub(toolCalls.stream()
                     .map(toolCall -> String.format("tool=%s, arguments=%s", toolCall.name(), toolCall.arguments()))
-                    .collect(Collectors.joining("\n")));
+                    .collect(Collectors.joining("\n"))));
 
             if (toolCalls.isEmpty()) {
-                getMessageList().add(assistantMessage);
+                getMessageList().add(new AssistantMessage(StrUtil.blankToDefault(finalResponse, "")));
                 setState(AgentState.FINISHED);
                 return false;
             }
@@ -91,6 +99,7 @@ public class ToolCallAgent extends ReActAgent {
         Prompt prompt = new Prompt(getMessageList(), chatOptions);
         ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, toolCallChatResponse);
         setMessageList(toolExecutionResult.conversationHistory());
+        persistToolExecutionHistory();
         ToolResponseMessage toolResponseMessage =
                 (ToolResponseMessage) CollUtil.getLast(toolExecutionResult.conversationHistory());
 
@@ -98,22 +107,59 @@ public class ToolCallAgent extends ReActAgent {
                 .anyMatch(response -> "doTerminate".equals(response.name()));
 
         String results = toolResponseMessage.getResponses().stream()
-                .map(response -> "Tool " + response.name() + " result: " + response.responseData())
+                .map(response -> "Tool " + response.name() + " result: " + scrub(String.valueOf(response.responseData())))
                 .collect(Collectors.joining("\n"));
 
         String nonTerminateResults = toolResponseMessage.getResponses().stream()
                 .filter(response -> !"doTerminate".equals(response.name()))
-                .map(response -> String.valueOf(response.responseData()))
+                .map(response -> sanitizeUserVisibleText(String.valueOf(response.responseData())))
                 .filter(StrUtil::isNotBlank)
                 .collect(Collectors.joining("\n"));
         if (StrUtil.isNotBlank(nonTerminateResults)) {
             this.lastToolResultSummary = nonTerminateResults;
         }
         if (terminated) {
+            appendNextStepPromptForFinalResponse();
             setState(AgentState.FINISHED);
         }
 
         return results;
+    }
+
+    private void appendNextStepPromptForFinalResponse() {
+        if (StrUtil.isBlank(getNextStepPrompt())) {
+            return;
+        }
+        var messages = getMessageList();
+        if (!messages.isEmpty()) {
+            var lastMessage = messages.get(messages.size() - 1);
+            if (lastMessage instanceof UserMessage
+                    && getNextStepPrompt().equals(StrUtil.blankToDefault(lastMessage.getText(), ""))) {
+                return;
+            }
+        }
+        messages.add(new UserMessage(getNextStepPrompt()));
+        setCurrentStep(getCurrentStep() + 1);
+    }
+
+    private void persistToolExecutionHistory() {
+        if (getRedisChatMemoryRepository() == null || StrUtil.isBlank(getChatId())) {
+            return;
+        }
+        persistCurrentRunMessagesToRedis(getMessageList());
+        log.info("{} persisted tool execution history to Redis, chatId={}, messages={}",
+                getName(), getChatId(), getMessageList().size());
+    }
+
+    private String scrub(String text) {
+        if (secretManager == null) {
+            return SecretManager.scrubLikelySecrets(text);
+        }
+        return secretManager.scrub(text);
+    }
+
+    private String sanitizeUserVisibleText(String text) {
+        return ToolTraceSanitizer.removeInternalToolTraceLines(scrub(text));
     }
 
     private void bindToolContext() {
@@ -131,11 +177,13 @@ public class ToolCallAgent extends ReActAgent {
 
     @Override
     protected String getFinalAssistantPrompt() {
-        if (StrUtil.isNotBlank(finalResponse)) {
-            return finalResponse;
+        String sanitizedFinalResponse = sanitizeUserVisibleText(finalResponse);
+        if (StrUtil.isNotBlank(sanitizedFinalResponse)) {
+            return sanitizedFinalResponse;
         }
-        if (StrUtil.isNotBlank(lastToolResultSummary)) {
-            return "已完成处理，结果如下：\n" + lastToolResultSummary;
+        String sanitizedToolSummary = sanitizeUserVisibleText(lastToolResultSummary);
+        if (StrUtil.isNotBlank(sanitizedToolSummary)) {
+            return "已完成处理，结果如下：\n" + sanitizedToolSummary;
         }
         return "";
     }

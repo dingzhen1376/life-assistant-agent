@@ -3,6 +3,7 @@ package com.yupi.lifeassistant.agent;
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.agent.model.AgentProfile;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
+import com.yupi.lifeassistant.safety.SecretManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.model.ChatModel;
@@ -42,6 +43,7 @@ public class AgentCoordinator {
     private final LifeMemoryService lifeMemoryService;
     private final ChatMemoryCompressAgent chatMemoryCompressAgent;
     private final AgentRegistry agentRegistry;
+    private final SecretManager secretManager;
 
     public AgentCoordinator(@Qualifier("workerTools") ToolCallback[] workerTools,
                             ChatModel dashscopeChatModel,
@@ -49,7 +51,8 @@ public class AgentCoordinator {
                             Advisor myRetrievalAugmentAdvisor,
                             LifeMemoryService lifeMemoryService,
                             ChatMemoryCompressAgent chatMemoryCompressAgent,
-                            AgentRegistry agentRegistry) {
+                            AgentRegistry agentRegistry,
+                            SecretManager secretManager) {
         this.workerTools = workerTools;
         this.dashscopeChatModel = dashscopeChatModel;
         this.stringRedisTemplate = stringRedisTemplate;
@@ -57,6 +60,7 @@ public class AgentCoordinator {
         this.lifeMemoryService = lifeMemoryService;
         this.chatMemoryCompressAgent = chatMemoryCompressAgent;
         this.agentRegistry = agentRegistry;
+        this.secretManager = secretManager;
     }
 
     // Supervisor分配任务给Worker
@@ -101,7 +105,7 @@ public class AgentCoordinator {
         String workerConversationId = agentRegistry.buildConversationId(targetProfile.id(), rootChatId);
         // 每次委派创建轻量运行实例，长期状态仍然落在 Redis/PGVector 记忆里。
         LifeManusAgent workerAgent = new LifeManusAgent(targetProfile, workerTools, dashscopeChatModel,
-                stringRedisTemplate, myRetrievalAugmentAdvisor, lifeMemoryService, chatMemoryCompressAgent);
+                stringRedisTemplate, myRetrievalAugmentAdvisor, lifeMemoryService, chatMemoryCompressAgent, secretManager);
         return workerAgent.run(buildWorkerPrompt(targetProfile, task), workerConversationId);
     }
 

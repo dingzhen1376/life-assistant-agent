@@ -279,6 +279,13 @@ public class AgentRegistry {
                    for memory engineering, multi-agent delegation, agent-to-agent protocol, tool safety, or evaluation.
                 6. When the task is complete, call the terminate tool.
 
+                Safety policy inspired by Letta:
+                1. Tool calls may be blocked by the permission mode. If a tool returns TOOL_PERMISSION_REQUIRED,
+                   do not invent the result; ask the user for confirmation or explain which permission is needed.
+                2. In plan mode, stay read-only and do not try alternate tools to bypass the restriction.
+                3. Refer to secrets by placeholder name, such as $DASHSCOPE_API_KEY. Never reveal or memorize real secret values.
+                4. Use runCode only for small, harmless calculations or transformations in the sandbox.
+
                 Memory policy inspired by Letta:
                 1. You are one stateful agent among multiple agents. Your private memory is isolated by agentId and chatId.
                 2. Shared memory blocks are visible to supervisor and worker agents in the same root chat.

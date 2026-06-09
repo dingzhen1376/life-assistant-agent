@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
+import com.yupi.lifeassistant.safety.SecretManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.Message;
@@ -40,13 +41,14 @@ public class SupervisorSleepTimeMemoryAgent {
     private final RedisChatMemoryRepository redisChatMemoryRepository;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
+    private final SecretManager secretManager;
 
     // 触发整理的用户消息数
     @Value("${life-assistant.memory.sleeptime.trigger-user-messages:20}")
     private int triggerUserMessages;
 
     // 整理最近的40条消息
-    @Value("${life-assistant.memory.sleeptime.recent-message-limit:40")
+    @Value("${life-assistant.memory.sleeptime.recent-message-limit:40}")
     private int recentMessageLimit;
 
     @Value("${life-assistant.memory.sleeptime.lock-minutes:10}")
@@ -55,13 +57,16 @@ public class SupervisorSleepTimeMemoryAgent {
     public SupervisorSleepTimeMemoryAgent(ChatModel dashscopeChatModel,
                                           LifeMemoryService lifeMemoryService,
                                           StringRedisTemplate stringRedisTemplate,
-                                          ObjectMapper objectMapper) {
+                                          ObjectMapper objectMapper,
+                                          SecretManager secretManager) {
         this.chatClient = ChatClient.builder(dashscopeChatModel).build();
         this.lifeMemoryService = lifeMemoryService;
         this.stringRedisTemplate = stringRedisTemplate;
         this.objectMapper = objectMapper;
+        this.secretManager = secretManager;
         this.redisChatMemoryRepository = RedisChatMemoryRepository.builder()
                 .stringRedisTemplate(stringRedisTemplate)
+                .contentSanitizer(secretManager::scrub)
                 .build();
     }
 
@@ -100,7 +105,7 @@ public class SupervisorSleepTimeMemoryAgent {
             //把核心记忆和最近的消息给大模型
             String rawDecision = askMemoryEditor(oldCoreMemory, recentMessages, userCount);
             //结构化大模型输出的结果
-            MemoryEditDecision decision = parseDecision(rawDecision);
+            MemoryEditDecision decision = parseDecision(secretManager.scrub(rawDecision));
 
             if (!decision.shouldUpdate()) {
                 log.info("Sleep-time memory update decided no core memory change is needed for conversationId={}: {}",

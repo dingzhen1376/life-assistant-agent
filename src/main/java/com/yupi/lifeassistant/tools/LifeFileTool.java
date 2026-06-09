@@ -1,5 +1,6 @@
 package com.yupi.lifeassistant.tools;
 
+import com.yupi.lifeassistant.safety.SecretManager;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
@@ -11,9 +12,15 @@ import java.nio.file.Path;
 public class LifeFileTool {
 
     private final Path workspace;
+    private final SecretManager secretManager;
 
     public LifeFileTool(String workspace) {
+        this(workspace, null);
+    }
+
+    public LifeFileTool(String workspace, SecretManager secretManager) {
         this.workspace = Path.of(workspace).toAbsolutePath().normalize();
+        this.secretManager = secretManager;
     }
 
     @Tool(description = "Read a UTF-8 note file from the life assistant workspace")
@@ -36,7 +43,7 @@ public class LifeFileTool {
         try {
             Path file = resolveInsideWorkspace(fileName);
             Files.createDirectories(file.getParent());
-            Files.writeString(file, content, StandardCharsets.UTF_8);
+            Files.writeString(file, scrubPersistentContent(content), StandardCharsets.UTF_8);
             return "File written: " + file;
         } catch (Exception e) {
             return "Error writing note: " + e.getMessage();
@@ -50,7 +57,8 @@ public class LifeFileTool {
         try {
             Path file = resolveInsideWorkspace(fileName);
             Files.createDirectories(file.getParent());
-            String text = content.endsWith(System.lineSeparator()) ? content : content + System.lineSeparator();
+            String safeContent = scrubPersistentContent(content);
+            String text = safeContent.endsWith(System.lineSeparator()) ? safeContent : safeContent + System.lineSeparator();
             Files.writeString(file, text, StandardCharsets.UTF_8,
                     Files.exists(file) ? java.nio.file.StandardOpenOption.APPEND : java.nio.file.StandardOpenOption.CREATE);
             return "Content appended: " + file;
@@ -66,5 +74,12 @@ public class LifeFileTool {
             throw new IllegalArgumentException("Path is outside workspace");
         }
         return file;
+    }
+
+    private String scrubPersistentContent(String content) {
+        if (secretManager == null) {
+            return SecretManager.scrubLikelySecrets(content);
+        }
+        return secretManager.scrub(content);
     }
 }

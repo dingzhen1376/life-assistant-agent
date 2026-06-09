@@ -26,6 +26,7 @@ public class LifeDocumentLoader {
      * 加载文档并返回包含哈希值的信息
      */
     public Map<String, DocumentInfo> loadMarkdownsWithHash() {
+        // DocumentInfo包括文档列表和文件名
         Map<String, DocumentInfo> documentMap = new HashMap<>();
         try {
             Resource[] resources = resourcePatternResolver.getResources("classpath:document/*.md");
@@ -36,7 +37,7 @@ public class LifeDocumentLoader {
                     continue;
                 }
 
-                
+
                 MarkdownDocumentReaderConfig config = MarkdownDocumentReaderConfig.builder()
                         .withHorizontalRuleCreateDocument(true)
                         .withIncludeCodeBlock(false)
@@ -79,7 +80,7 @@ public class LifeDocumentLoader {
     }
 
     /**
-     * 文档信息类，包含文档列表和哈希值
+     * 文档信息类，包含文档列表和文档名
      */
     public static class DocumentInfo {
         private final List<Document> documents;

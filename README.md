@@ -11,6 +11,7 @@
 - Letta-style Skill 资源：`src/main/resources/skills`
 - 记忆管理说明：`README-MEMORY.md`
 - 多 Agent 说明：`README-MULTI-AGENT.md`
+- 安全机制说明：`README-SAFETY.md`
 
 ## 技术栈
 
@@ -26,6 +27,7 @@
 | 长期向量记忆 | 独立 PGVector 表 `life_archival_memory` |
 | Markdown 文档读取 | `spring-ai-markdown-document-reader` |
 | 工具调用 | Spring AI Tool Calling |
+| 安全机制 | Tool permission wrapper + sandboxed runCode + secret scrub |
 | API 文档 | springdoc-openapi + Knife4j |
 | 前端 | 原生 HTML / CSS / JavaScript |
 | 本地代理 | Nginx，默认监听 `8080` |
@@ -161,6 +163,7 @@ src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
 | `BudgetTool` | 预算统计 |
 | `SkillTool` | Letta-style skill 列表、检索和读取 |
 | `LifeMemoryTool` | core / shared / archival / conversation memory |
+| `SandboxedCodeTool` | 受限 Java/jshell 沙箱代码执行 |
 | `AgentDelegationTool` | supervisor 专用的 Agent-to-Agent 工具 |
 | `TerminateTool` | 结束 Agent 任务 |
 
@@ -170,6 +173,37 @@ src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
 | --- | --- | --- |
 | `workerTools` | worker agents | 不包含 `AgentDelegationTool` |
 | `supervisorTools` | supervisor agent | 包含 `AgentDelegationTool` |
+
+## 安全机制
+
+项目新增了 Letta 风格安全层，核心思想是所有工具调用先经过统一权限判断，再决定执行、要求确认或拒绝。
+
+配置入口：
+
+```yaml
+life-assistant:
+  safety:
+    tool-permission-mode: default # default / accept-edits / plan / bypass / yolo
+```
+
+主要组件：
+
+| 类 | 职责 |
+| --- | --- |
+| `ToolSafetyService` | 根据工具名和权限模式判断 allow / ask / deny |
+| `SecureToolCallback` | 包装 Spring AI `ToolCallback`，在真正执行前拦截 |
+| `SandboxedCodeTool` | 在受限 jshell 环境中执行小段 Java 代码 |
+| `SecretManager` | secret placeholder 注入和输出脱敏 |
+
+安全边界：
+
+- `default`：除 `doTerminate` 外，每个工具调用都要求确认。
+- `accept-edits`：文件编辑自动允许，memory 写入、委派、代码执行仍询问。
+- `plan`：只读/纯计算模式，不允许副作用工具。
+- `bypass` / `yolo`：大部分自动允许，风险最高，但工具自身的沙箱、路径检查、SSRF 阻断和 secret scrub 仍生效。
+- Secret 在 prompt / memory 中只暴露名称，例如 `$DASHSCOPE_API_KEY`；真实值只允许在 `runCode` 执行前临时注入，stdout / stderr / tool response 会再脱敏。
+
+完整说明见 [README-SAFETY.md](README-SAFETY.md)。
 
 ## Skill 系统
 
@@ -474,6 +508,7 @@ life-assistant-agent
 │  ├─ controller
 │  ├─ memory
 │  ├─ rag
+│  ├─ safety
 │  ├─ skill
 │  └─ tools
 ├─ src/main/resources
@@ -482,6 +517,7 @@ life-assistant-agent
 │  └─ skills
 ├─ README-MEMORY.md
 ├─ README-MULTI-AGENT.md
+├─ README-SAFETY.md
 └─ pom.xml
 ```
 
@@ -531,6 +567,19 @@ life-assistant-agent
 3. AgentSkillRepository
 4. SkillTool
 5. ToolRegistration
+```
+
+如果想理解安全机制：
+
+```text
+1. README-SAFETY.md
+2. SafetyProperties
+3. ToolSafetyService
+4. SecureToolCallback
+5. ToolRegistration
+6. SandboxedCodeTool
+7. SecretManager
+8. LifeMemoryService
 ```
 
 ## 当前设计取舍

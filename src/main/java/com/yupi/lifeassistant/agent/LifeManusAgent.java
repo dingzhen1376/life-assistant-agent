@@ -6,6 +6,7 @@ import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
 import com.yupi.lifeassistant.memory.ContextQueueManager;
 import com.yupi.lifeassistant.memory.LettaChatMemory;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
+import com.yupi.lifeassistant.safety.SecretManager;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
@@ -28,8 +29,9 @@ public class LifeManusAgent extends ToolCallAgent {
                           StringRedisTemplate stringRedisTemplate,
                           Advisor myRedisVectorStoreAdvisor,
                           LifeMemoryService lifeMemoryService,
-                          ChatMemoryCompressAgent chatMemoryCompressAgent) {
-        super(allTools);
+                          ChatMemoryCompressAgent chatMemoryCompressAgent,
+                          SecretManager secretManager) {
+        super(allTools, secretManager);
         // 同一个运行类通过不同 Profile 变成不同 Agent，避免为每个 worker 复制一套执行循环。
         this.setName(profile.name());
         this.setSystemPrompt(profile.systemPrompt());
@@ -41,6 +43,7 @@ public class LifeManusAgent extends ToolCallAgent {
 
         RedisChatMemoryRepository redisChatMemoryRepository = RedisChatMemoryRepository.builder()
                 .stringRedisTemplate(stringRedisTemplate)
+                .contentSanitizer(secretManager::scrub)
                 .build();
         this.setRedisChatMemoryRepository(redisChatMemoryRepository);
 
@@ -51,7 +54,7 @@ public class LifeManusAgent extends ToolCallAgent {
 
         // ChatClient 使用 LettaChatMemory 作为窗口入口；完整历史仍由 Redis repository 承载。
         this.setChatClient(ChatClient.builder(dashscopeChatModel)
-                .defaultAdvisors(new MyLoggerAdvisor())
+                .defaultAdvisors(new MyLoggerAdvisor(secretManager))
                 .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
                 .defaultAdvisors(myRedisVectorStoreAdvisor)
                 .build());

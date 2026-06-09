@@ -55,6 +55,21 @@ life-assistant:
       trigger-user-messages: 20 # supervisor 每新增 20 条外部用户消息后触发一次后台记忆整理
       recent-message-limit: 40 # 每次整理只读取最近一段 supervisor 对话，避免把完整历史塞给压缩 Agent
       lock-minutes: 10 # Redis 分布式锁过期时间，防止同一 supervisor 会话重复整理
+  safety:
+    tool-permission-mode: default # default / accept-edits / plan / bypass / yolo
+    sandbox:
+      timeout-seconds: 5
+      max-output-chars: 8000
+      allowed-languages:
+        - java
+    secrets:
+      allowed-names:
+        - OPENAI_API_KEY
+        - DASHSCOPE_API_KEY
+        - PGSQL_PASSWORD
+      aliases:
+        DASHSCOPE_API_KEY: ai.my-api-key
+        PGSQL_PASSWORD: pgsql.password
   vectorstore:
     auto-init: true # 启用自动同步（推荐常驻）
     force-reinit: false # 默认false，需要全量重刷时临时改为true

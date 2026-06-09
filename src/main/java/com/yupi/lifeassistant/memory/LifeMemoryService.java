@@ -2,6 +2,7 @@ package com.yupi.lifeassistant.memory;
 
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
+import com.yupi.lifeassistant.safety.SecretManager;
 import com.yupi.lifeassistant.skill.AgentSkillRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.Message;
@@ -64,21 +65,26 @@ public class LifeMemoryService {
     private final RedisChatMemoryRepository chatMemoryRepository;
     private final JdbcTemplate jdbcTemplate;
     private final AgentSkillRepository agentSkillRepository;
+    private final SecretManager secretManager;
     private final VectorStore archivalMemoryStore;
 
     public LifeMemoryService(StringRedisTemplate stringRedisTemplate,
                              JdbcTemplate jdbcTemplate,
                              EmbeddingModel dashscopeEmbeddingModel,
-                             AgentSkillRepository agentSkillRepository) {
+                             AgentSkillRepository agentSkillRepository,
+                             SecretManager secretManager) {
         Assert.notNull(stringRedisTemplate, "stringRedisTemplate cannot be null");
         Assert.notNull(jdbcTemplate, "jdbcTemplate cannot be null");
         Assert.notNull(dashscopeEmbeddingModel, "dashscopeEmbeddingModel cannot be null");
         Assert.notNull(agentSkillRepository, "agentSkillRepository cannot be null");
+        Assert.notNull(secretManager, "secretManager cannot be null");
         this.stringRedisTemplate = stringRedisTemplate;
         this.jdbcTemplate = jdbcTemplate;
         this.agentSkillRepository = agentSkillRepository;
+        this.secretManager = secretManager;
         this.chatMemoryRepository = RedisChatMemoryRepository.builder()
                 .stringRedisTemplate(stringRedisTemplate)
+                .contentSanitizer(secretManager::scrub)
                 .build();
         // 独立于 RAG 文档表 vector_store，避免用户长期记忆和内置知识库混在一起。
         this.archivalMemoryStore = PgVectorStore.builder(jdbcTemplate, dashscopeEmbeddingModel)
@@ -118,7 +124,10 @@ public class LifeMemoryService {
      * 又能保留自己的私有长期状态。
      */
     public String renderMemoryContext(String conversationId) {
-        return renderSharedMemory(conversationId) + "\n" + renderCoreMemory(conversationId);
+        return renderSharedMemory(conversationId)
+                + "\n"
+                + renderCoreMemory(conversationId)
+                + secretManager.renderSecretNamesForPrompt();
     }
 
     /**
@@ -196,7 +205,7 @@ public class LifeMemoryService {
         if (isManagedCoreBlock(normalizedBlockName)) {
             return managedCoreBlockMessage(normalizedBlockName);
         }
-        String normalizedContent = normalizeContent(content, "content");
+        String normalizedContent = normalizeMemoryContent(content, "content");
         String key = getCoreMemoryKey(chatId);
         //初始化 core memory
         initializeCoreMemory(chatId);
@@ -216,7 +225,7 @@ public class LifeMemoryService {
      */
     public String insertSharedMemory(String conversationId, String blockName, String content) {
         String normalizedBlockName = normalizeBlockName(blockName);
-        String normalizedContent = normalizeContent(content, "content");
+        String normalizedContent = normalizeMemoryContent(content, "content");
         String key = getSharedMemoryKey(conversationId);
         initializeSharedMemory(conversationId);
 
@@ -235,7 +244,7 @@ public class LifeMemoryService {
      */
     public String replaceSharedMemory(String conversationId, String blockName, String newText) {
         String normalizedBlockName = normalizeBlockName(blockName);
-        String normalizedNewText = normalizeContent(newText, "newText");
+        String normalizedNewText = normalizeMemoryContent(newText, "newText");
         validateSharedBlockSize(normalizedBlockName, normalizedNewText);
         initializeSharedMemory(conversationId);
         stringRedisTemplate.opsForHash().put(getSharedMemoryKey(conversationId), normalizedBlockName, normalizedNewText);
@@ -248,7 +257,7 @@ public class LifeMemoryService {
         if (isManagedCoreBlock(normalizedBlockName)) {
             return managedCoreBlockMessage(normalizedBlockName);
         }
-        String normalizedNewText = normalizeContent(newText, "newText");
+        String normalizedNewText = normalizeMemoryContent(newText, "newText");
         String key = getCoreMemoryKey(chatId);
         initializeCoreMemory(chatId);
 
@@ -263,7 +272,7 @@ public class LifeMemoryService {
         if (isManagedCoreBlock(normalizedBlockName)) {
             return managedCoreBlockMessage(normalizedBlockName);
         }
-        String normalizedContent = normalizeContent(content, "content");
+        String normalizedContent = normalizeMemoryContent(content, "content");
         validateCoreBlockSize(normalizedBlockName, normalizedContent);
         initializeCoreMemory(chatId);
         stringRedisTemplate.opsForHash().put(getCoreMemoryKey(chatId), normalizedBlockName, normalizedContent);
@@ -272,7 +281,7 @@ public class LifeMemoryService {
 
     // 插入 archival memory。短事实可以由模型写入；长文档更适合由文件/网页等外部输入读入后在这里分块入库。
     public String insertArchivalMemory(String chatId, String content, String tags) {
-        String normalizedContent = normalizeContent(content, "content");
+        String normalizedContent = normalizeMemoryContent(content, "content");
         String memoryId = "archival-memory-" + UUID.randomUUID();
         List<String> chunks = splitArchivalContent(normalizedContent);
         List<Document> documents = new ArrayList<>(chunks.size());
@@ -394,7 +403,7 @@ public class LifeMemoryService {
         String key = getCoreMemoryKey(chatId);
         //当这些block为空的时候才会初始化
         stringRedisTemplate.opsForHash().putIfAbsent(key, "persona",
-                "");
+                "The active agent persona is defined by the selected AgentProfile system prompt");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "human",
                 "");
         stringRedisTemplate.opsForHash().putIfAbsent(key, "preferences",
@@ -525,6 +534,11 @@ public class LifeMemoryService {
             throw new IllegalArgumentException(fieldName + " cannot be blank");
         }
         return content.trim();
+    }
+
+    private String normalizeMemoryContent(String content, String fieldName) {
+        // Durable memory may mention a secret by name, but it must never persist the real value.
+        return secretManager.scrub(normalizeContent(content, fieldName));
     }
 
     private static void validateCoreBlockSize(String blockName, String content) {

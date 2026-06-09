@@ -482,6 +482,105 @@ textarea {
   margin-top: 20px;
 }
 
+/* ── 工具权限确认卡片（内联在消息流中） ── */
+
+.message.permission {
+  flex-direction: row;
+}
+
+.permission-card {
+  max-width: min(420px, 78vw);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.perm-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 15px;
+}
+
+.perm-card-icon {
+  font-size: 18px;
+}
+
+.perm-badge {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.perm-badge.allowed {
+  background: var(--accent);
+  color: #fff;
+}
+
+.perm-badge.denied {
+  background: var(--danger);
+  color: #fff;
+}
+
+.perm-card-detail {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.perm-card-row {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.perm-card-row span:first-child {
+  flex: 0 0 60px;
+  color: var(--muted);
+}
+
+.perm-card-row span:last-child {
+  word-break: break-all;
+}
+
+.perm-card-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.perm-deny-btn {
+  min-height: 34px;
+  padding: 0 16px;
+  font-size: 13px;
+}
+
+.perm-allow-btn {
+  min-height: 34px;
+  padding: 0 20px;
+  font-size: 13px;
+}
+
+.danger-btn {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.danger-btn:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
 @media (max-width: 780px) {
   .app-shell {
     grid-template-columns: 1fr;

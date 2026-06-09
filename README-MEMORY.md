@@ -348,6 +348,8 @@ Core Memory 每轮都会进入 system prompt，并且不随单次对话切换；
 
 `skills` 是系统自动维护的 core memory block，只保存 skill 的 `name + description`。这样模型每轮都知道可用 skill，但完整 `SKILL.md` 内容不会常驻上下文，需要时再通过 `readSkill(skillId)` 加载。
 
+Core / shared / archival memory 写入前会经过 `SecretManager.scrub(...)`。如果内容中出现真实 secret 值，会被替换成 `$SECRET_NAME` 或 redacted marker；memory 可以保存“需要使用 `$DASHSCOPE_API_KEY`”这种名称引用，但不保存真实密钥。
+
 ### 6.2 Recall Memory
 
 复用原来的 Redis 对话历史：
@@ -357,6 +359,7 @@ chat:memory:{chatId}
 ```
 
 通过 `searchConversation(...)` 做关键词检索。
+写入 Redis 前同样会做 secret scrub，避免 recall memory 长期保存真实 secret。
 
 ### 6.3 Archival Memory
 

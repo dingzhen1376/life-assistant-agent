@@ -3,6 +3,8 @@ const DEFAULT_API_BASE = "/api";
 
 const state = loadState();
 let activeEventSource = null;
+/** 权限轮询定时器，流式生成期间每秒查询一次是否有待确认的工具权限 */
+let permissionPollTimer = null;
 
 const els = {
   body: document.body,
@@ -138,6 +140,14 @@ function sendMessage(text) {
   activeEventSource = new EventSource(url);
   els.connectionState.textContent = "生成中";
 
+  activeEventSource.addEventListener("permission", (event) => {
+    handlePermissionEvent(event.data);
+    els.connectionState.textContent = "等待工具确认";
+  });
+
+  // SSE permission 事件是主路径；轮询保留为代理/浏览器未及时分发自定义事件时的兜底。
+  startPermissionPolling(thread.chatId);
+
   activeEventSource.onmessage = (event) => {
     assistantMessage.content += formatSseChunk(event.data);
     renderMessages();
@@ -161,6 +171,7 @@ function stopStreaming() {
     activeEventSource.close();
     activeEventSource = null;
   }
+  stopPermissionPolling();
   setBusy(false);
   els.connectionState.textContent = "就绪";
   persist();
@@ -262,7 +273,12 @@ function renderMessages() {
   els.emptyState.hidden = hasMessages;
   [...els.messageRegion.querySelectorAll(".message")].forEach((node) => node.remove());
 
-  thread.messages.forEach((message) => {
+  thread.messages.forEach((message, idx) => {
+    if (message.role === "permission") {
+      renderPermissionCard(message, idx);
+      return;
+    }
+
     const row = document.createElement("article");
     row.className = `message ${message.role}`;
 
@@ -272,13 +288,57 @@ function renderMessages() {
 
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    bubble.innerHTML = renderMarkdownLite(message.content);
+    bubble.innerHTML = renderMarkdownLite(message.content || "");
 
     row.append(avatar, bubble);
     els.messageRegion.appendChild(row);
   });
 
   scrollMessagesToBottom();
+}
+
+function renderPermissionCard(msg, idx) {
+  const row = document.createElement("article");
+  row.className = "message permission";
+
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "L";
+
+  const card = document.createElement("div");
+  card.className = "permission-card";
+
+  const isResolved = msg.status === "allowed" || msg.status === "denied";
+
+  let statusBadge = "";
+  if (msg.status === "allowed") {
+    statusBadge = "<span class=\"perm-badge allowed\">已允许</span>";
+  } else if (msg.status === "denied") {
+    statusBadge = "<span class=\"perm-badge denied\">已拒绝</span>";
+  }
+
+  card.innerHTML = `<div class="perm-card-head">
+      <span class="perm-card-icon">&#9888;</span>
+      <strong>工具执行确认</strong>
+      ${statusBadge}
+    </div>
+    <div class="perm-card-detail">
+      <div class="perm-card-row"><span>工具名</span><span>${escapeHtml(msg.toolName)}</span></div>
+      <div class="perm-card-row"><span>风险等级</span><span>${riskCategoryLabel(msg.riskCategory)}</span></div>
+      <div class="perm-card-row"><span>原因</span><span>${escapeHtml(msg.reason)}</span></div>
+    </div>` +
+    (isResolved ? "" : `<div class="perm-card-actions">
+      <button class="danger-btn perm-deny-btn" data-perm-idx="${idx}">拒绝</button>
+      <button class="primary-btn perm-allow-btn" data-perm-idx="${idx}">允许</button>
+    </div>`);
+
+  row.append(avatar, card);
+  els.messageRegion.appendChild(row);
+
+  if (!isResolved) {
+    card.querySelector(".perm-allow-btn")?.addEventListener("click", () => resolvePermission("ALLOW", idx));
+    card.querySelector(".perm-deny-btn")?.addEventListener("click", () => resolvePermission("DENY", idx));
+  }
 }
 
 function renderMarkdownLite(text) {
@@ -432,4 +492,111 @@ function createUuid() {
 
 function isUuid(value) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value || "");
+}
+
+// ── 工具权限确认 ──
+
+/**
+ * 在消息流中插入一张权限确认卡片，用户点击允许/拒绝后 POST 到后端。
+ * 卡片直接出现在对话区，如 Claude Code 的工具确认 UI。
+ */
+function handlePermissionEvent(jsonData) {
+  let perm;
+  try {
+    perm = JSON.parse(jsonData);
+  } catch {
+    return;
+  }
+  const thread = currentThread();
+  // 如果同一请求的卡片已在展示中，跳过（轮询去重）
+  if (thread.messages.some((m) => m.role === "permission" && m.status === "pending" && m.requestId === perm.requestId)) {
+    return;
+  }
+  // 移除旧的内联权限卡片（同一轮对话只保留最新一张待处理请求）
+  thread.messages = thread.messages.filter((m) => m.role !== "permission" || m.status !== "pending");
+  thread.messages.push({
+    role: "permission",
+    status: "pending",
+    requestId: perm.requestId,
+    chatId: perm.chatId,
+    toolName: perm.toolName || "-",
+    riskCategory: perm.riskCategory || "UNKNOWN",
+    mode: perm.mode || "-",
+    reason: perm.reason || "-",
+    createdAt: Date.now(),
+  });
+  renderMessages();
+  persist();
+}
+
+async function resolvePermission(action, messageIdx) {
+  const thread = currentThread();
+  const msg = thread.messages[messageIdx];
+  if (!msg || msg.role !== "permission" || msg.status !== "pending") {
+    return;
+  }
+  msg.status = action === "ALLOW" ? "allowed" : "denied";
+  renderMessages();
+  persist();
+
+  const params = new URLSearchParams({ chatId: msg.chatId, requestId: msg.requestId, action });
+  try {
+    const response = await fetch(
+      `${state.apiBase || DEFAULT_API_BASE}/ai/life/tool-permission?${params.toString()}`,
+      { method: "POST", cache: "no-store" }
+    );
+    if (!response.ok) {
+      els.connectionState.textContent = "权限请求失败";
+    }
+  } catch {
+    els.connectionState.textContent = "权限请求失败";
+  }
+}
+
+function riskCategoryLabel(category) {
+  const labels = {
+    READ_ONLY: "只读（安全）",
+    COMPUTE_ONLY: "纯计算（安全）",
+    FILE_EDIT: "文件编辑",
+    MEMORY_WRITE: "记忆写入",
+    DELEGATION: "Agent 委派",
+    CODE_EXECUTION: "代码执行（高风险）",
+    TERMINATE: "终止会话",
+    UNKNOWN: "未知（需确认）",
+  };
+  return labels[category] || category || "-";
+}
+
+// ── 权限轮询 ──
+
+function startPermissionPolling(rootChatId) {
+  stopPermissionPolling();
+  let shownRequestIds = new Set();
+  permissionPollTimer = setInterval(async () => {
+    try {
+      const url = `${state.apiBase || DEFAULT_API_BASE}/ai/life/pending-permission?chatId=${encodeURIComponent(rootChatId)}`;
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) return;
+      const text = await response.text();
+      if (!text || text === "null" || text === "") return;
+
+      let perm;
+      try { perm = JSON.parse(text); } catch { return; }
+      if (!perm.requestId || !perm.chatId) return;
+      // 同一个请求不重复弹窗
+      if (shownRequestIds.has(perm.requestId)) return;
+      shownRequestIds.add(perm.requestId);
+      handlePermissionEvent(JSON.stringify(perm));
+      els.connectionState.textContent = "等待工具确认";
+    } catch {
+      // 静默忽略
+    }
+  }, 1000);
+}
+
+function stopPermissionPolling() {
+  if (permissionPollTimer != null) {
+    clearInterval(permissionPollTimer);
+    permissionPollTimer = null;
+  }
 }

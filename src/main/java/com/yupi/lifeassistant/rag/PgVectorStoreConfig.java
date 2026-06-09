@@ -98,14 +98,14 @@ public class PgVectorStoreConfig {
                     currentDocIds.add(stableId);
                 }
 
-                // 删除不再存在的文档（例如文件中的某些段落被删除）
+                // 删除不再存在的document文档（例如文件中的某些段落被删除）
                 for (String existingId : existingDocIds) {
                     if (!currentDocIds.contains(existingId)) {
                         deleteDocument(existingId);
                     }
                 }
 
-                // 检查新增和更新的md文件
+                // 检查新增和更新的md文件，这里判断的是md文件，所以只要有一个document变更了就break
                 boolean fileChanged = false;
                 for (Document doc : info.getDocuments()) {
                     String stableId = (String) doc.getMetadata().get("stable_id");
@@ -144,7 +144,7 @@ public class PgVectorStoreConfig {
                 return vectorStore;
             }
 
-            logger.info("需要更新 {} 个文件", toProcess.size());
+            logger.info("需要更新 {} 个md文件", toProcess.size());
 
             // 处理并添加新/更新的文档
             if (!toProcess.isEmpty()) {
@@ -203,7 +203,7 @@ public class PgVectorStoreConfig {
             String sourceFile = info.getFilename();
             List<Document> allDocuments = info.getDocuments();
             
-            logger.info("正在处理文件: {}/{}", sourceFile, allDocuments.size());
+            logger.info("正在处理文件: {}/{}个document文档", sourceFile, allDocuments.size());
             
             // 逐个处理文档
             for (int docIdx = 0; docIdx < allDocuments.size(); docIdx++) {

@@ -2,6 +2,7 @@ package com.yupi.lifeassistant.agent;
 
 import cn.hutool.core.util.StrUtil;
 import com.yupi.lifeassistant.chatmemory.RedisChatMemoryRepository;
+import com.yupi.lifeassistant.safety.SecretManager;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.Message;
@@ -24,6 +25,7 @@ public class ChatMemoryCompressAgent {
     private final ChatClient chatClient;
     private final RedisChatMemoryRepository redisChatMemoryRepository;
     private final StringRedisTemplate stringRedisTemplate;
+    private final SecretManager secretManager;
 
     @Value("${life-assistant.memory.queue.max-active-messages:30}")
     private int maxActiveMessages;
@@ -39,11 +41,15 @@ public class ChatMemoryCompressAgent {
     @Value("${life-assistant.memory.queue.max-active-chars:18000}")
     private int maxActiveChars;
 
-    public ChatMemoryCompressAgent(ChatModel dashscopeChatModel, StringRedisTemplate stringRedisTemplate) {
+    public ChatMemoryCompressAgent(ChatModel dashscopeChatModel,
+                                   StringRedisTemplate stringRedisTemplate,
+                                   SecretManager secretManager) {
         this.chatClient = ChatClient.builder(dashscopeChatModel).build();
         this.stringRedisTemplate = stringRedisTemplate;
+        this.secretManager = secretManager;
         this.redisChatMemoryRepository = RedisChatMemoryRepository.builder()
                 .stringRedisTemplate(stringRedisTemplate)
+                .contentSanitizer(secretManager::scrub)
                 .build();
     }
 
@@ -143,12 +149,12 @@ public class ChatMemoryCompressAgent {
                     .call()
                     .content();
             if (StrUtil.isNotBlank(summary)) {
-                return limitText(summary.trim(), targetChars);
+                return secretManager.scrub(limitText(summary.trim(), targetChars));
             }
         } catch (Exception e) {
             log.warn("Shared memory block compression failed for blockName={}, using fallback", blockName, e);
         }
-        return fallbackSharedMemorySummary(oldText, incomingText, targetChars);
+        return secretManager.scrub(fallbackSharedMemorySummary(oldText, incomingText, targetChars));
     }
 
     /**
@@ -191,12 +197,12 @@ public class ChatMemoryCompressAgent {
                     .call()
                     .content();
             if (StrUtil.isNotBlank(summary)) {
-                return limitText(summary.trim(), targetChars);
+                return secretManager.scrub(limitText(summary.trim(), targetChars));
             }
         } catch (Exception e) {
             log.warn("Long text compression failed for purpose={}, using fallback", purpose, e);
         }
-        return limitText(sourceText, targetChars);
+        return secretManager.scrub(limitText(sourceText, targetChars));
     }
 
     public List<Message> getActiveMessages(String chatId) {
@@ -271,13 +277,13 @@ public class ChatMemoryCompressAgent {
                     .call()
                     .content();
             if (StrUtil.isNotBlank(summary)) {
-                return summary.trim();
+                return secretManager.scrub(summary.trim());
             }
         } catch (Exception e) {
             log.warn("LLM compression failed for chatId={}, using fallback summary", chatId, e);
         }
         // 压缩失败时保留截断后的原文摘要，避免上下文管理失败导致本轮对话中断。
-        return fallbackSummary(rollingSummary, transcript);
+        return secretManager.scrub(fallbackSummary(rollingSummary, transcript));
     }
 
     private int normalizeCompressedCount(String chatId, int messageCount) {
@@ -297,7 +303,7 @@ public class ChatMemoryCompressAgent {
         if (StrUtil.isBlank(summary)) {
             stringRedisTemplate.delete(summaryKey(chatId));
         } else {
-            stringRedisTemplate.opsForValue().set(summaryKey(chatId), summary);
+            stringRedisTemplate.opsForValue().set(summaryKey(chatId), secretManager.scrub(summary));
         }
     }
 

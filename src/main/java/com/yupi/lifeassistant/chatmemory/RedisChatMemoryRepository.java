@@ -1,5 +1,7 @@
 package com.yupi.lifeassistant.chatmemory;
 
+import com.yupi.lifeassistant.safety.SecretManager;
+import com.yupi.lifeassistant.safety.ToolTraceSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -16,6 +18,7 @@ import org.springframework.util.Assert;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 public final class RedisChatMemoryRepository implements ChatMemoryRepository {
@@ -30,9 +33,13 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
 
     private final StringRedisTemplate stringRedisTemplate;
 
-    private RedisChatMemoryRepository(StringRedisTemplate stringRedisTemplate) {
+    private final UnaryOperator<String> contentSanitizer;
+
+    private RedisChatMemoryRepository(StringRedisTemplate stringRedisTemplate,
+                                      UnaryOperator<String> contentSanitizer) {
         Assert.notNull(stringRedisTemplate, "stringRedisTemplate cannot be null");
         this.stringRedisTemplate = stringRedisTemplate;
+        this.contentSanitizer = contentSanitizer == null ? SecretManager::scrubLikelySecrets : contentSanitizer;
     }
 
     @Override
@@ -43,6 +50,14 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
 
     @Override
     public List<Message> findByConversationId(String conversationId) {
+        return findByConversationId(conversationId, false);
+    }
+
+    public List<Message> findRawByConversationId(String conversationId) {
+        return findByConversationId(conversationId, true);
+    }
+
+    private List<Message> findByConversationId(String conversationId, boolean includeInternalToolTraces) {
         Assert.hasText(conversationId, "conversationId cannot be null or empty");
 
         String key = getMessagesKey(conversationId);
@@ -54,7 +69,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
 
         List<Message> messages = new ArrayList<>(values.size());
         for (String value : values) {
-            Message message = deserializeMessage(value);
+            Message message = deserializeMessage(value, includeInternalToolTraces);
             if (message != null) {
                 messages.add(message);
             }
@@ -77,8 +92,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
 
             connection.keyCommands().del(messageKey);
 
-            for (Message message : messages) {
-                String serialized = serializeMessage(message);
+            for (String serialized : serializeMessages(messages)) {
                 byte[] body = this.stringRedisTemplate.getStringSerializer().serialize(serialized);
                 connection.listCommands().rPush(messageKey, body);
             }
@@ -162,7 +176,30 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
         return MESSAGE_KEY_PREFIX + conversationId;
     }
 
-    private static String serializeMessage(Message message) {
+    private List<String> serializeMessages(List<Message> messages) {
+        List<String> serializedMessages = new ArrayList<>(messages.size());
+        for (int i = 0; i < messages.size(); i++) {
+            Message message = messages.get(i);
+            if (message instanceof AssistantMessage assistantMessage
+                    && !assistantMessage.getToolCalls().isEmpty()
+                    && i + 1 < messages.size()
+                    && messages.get(i + 1) instanceof ToolResponseMessage toolResponseMessage) {
+                String serialized = serializeAssistantToolExchange(assistantMessage, toolResponseMessage);
+                if (serialized != null) {
+                    serializedMessages.add(serialized);
+                }
+                i++;
+                continue;
+            }
+            String serialized = serializeMessage(message);
+            if (serialized != null) {
+                serializedMessages.add(serialized);
+            }
+        }
+        return serializedMessages;
+    }
+
+    private String serializeMessage(Message message) {
         Assert.notNull(message, "message cannot be null");
         Assert.notNull(message.getMessageType(), "messageType cannot be null");
 
@@ -171,12 +208,29 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
             case USER, SYSTEM -> textOrEmpty(message);
             case ASSISTANT -> serializeAssistantMessage(message);
             case TOOL -> {
+                // Tool responses are persisted as ASSISTANT text intentionally.
+                // BaseAgent.cleanupIntermediateToolMessagesIfNecessary() depends on these
+                // intermediate rows existing first, then deletes them after the final answer.
                 serializedType = MessageType.ASSISTANT;
                 yield serializeToolResponseMessage(message);
             }
         };
+        if (content.isBlank() && serializedType == MessageType.ASSISTANT) {
+            return null;
+        }
 
-        return serializedType.name() + SEPARATOR + escape(content);
+        return serializedType.name() + SEPARATOR + escape(contentSanitizer.apply(content));
+    }
+
+    private String serializeAssistantToolExchange(AssistantMessage assistantMessage,
+                                                  ToolResponseMessage toolResponseMessage) {
+        String toolCallContent = serializeAssistantMessage(assistantMessage);
+        String toolResponseContent = serializeToolResponseMessage(toolResponseMessage);
+        String content = (toolCallContent + "\n" + toolResponseContent).trim();
+        if (content.isBlank()) {
+            return null;
+        }
+        return MessageType.ASSISTANT.name() + SEPARATOR + escape(contentSanitizer.apply(content));
     }
 
     private static String textOrEmpty(Message message) {
@@ -189,6 +243,8 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
             return text;
         }
         if (message instanceof AssistantMessage assistantMessage && !assistantMessage.getToolCalls().isEmpty()) {
+            // Persist internal tool calls for backend debugging and cleanup bookkeeping.
+            // findByConversationId filters these traces back out before they re-enter model context.
             return assistantMessage.getToolCalls().stream()
                     .map(toolCall -> "调用工具：" + nullToEmpty(toolCall.name())
                             + "\n调用ID：" + nullToEmpty(toolCall.id())
@@ -216,7 +272,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
         return value != null ? value : "";
     }
 
-    private static Message deserializeMessage(String value) {
+    private static Message deserializeMessage(String value, boolean includeInternalToolTraces) {
         if (value == null) {
             return null;
         }
@@ -229,6 +285,15 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
 
         String typeValue = value.substring(0, index);
         String contentValue = unescape(value.substring(index + SEPARATOR.length()));
+        if (!includeInternalToolTraces) {
+            if (ToolTraceSanitizer.isInternalToolTrace(contentValue)) {
+                return null;
+            }
+            contentValue = ToolTraceSanitizer.removeInternalToolTraceLines(contentValue);
+            if (contentValue.isBlank() && !MessageType.USER.name().equals(typeValue)) {
+                return null;
+            }
+        }
 
         MessageType type;
         try {
@@ -287,6 +352,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
     public static final class Builder {
 
         private StringRedisTemplate stringRedisTemplate;
+        private UnaryOperator<String> contentSanitizer = SecretManager::scrubLikelySecrets;
 
         private Builder() {
         }
@@ -296,9 +362,14 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository {
             return this;
         }
 
+        public Builder contentSanitizer(UnaryOperator<String> contentSanitizer) {
+            this.contentSanitizer = contentSanitizer;
+            return this;
+        }
+
         public RedisChatMemoryRepository build() {
             Assert.notNull(this.stringRedisTemplate, "stringRedisTemplate cannot be null");
-            return new RedisChatMemoryRepository(this.stringRedisTemplate);
+            return new RedisChatMemoryRepository(this.stringRedisTemplate, this.contentSanitizer);
         }
     }
 }

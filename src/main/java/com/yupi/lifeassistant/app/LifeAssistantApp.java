@@ -7,6 +7,8 @@ import com.yupi.lifeassistant.agent.SupervisorSleepTimeMemoryAgent;
 import com.yupi.lifeassistant.agent.model.AgentProfile;
 import com.yupi.lifeassistant.agent.model.AgentSummary;
 import com.yupi.lifeassistant.memory.LifeMemoryService;
+import com.yupi.lifeassistant.safety.PendingPermissionRegistry;
+import com.yupi.lifeassistant.safety.SecretManager;
 import jakarta.annotation.Resource;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.model.ChatModel;
@@ -47,6 +49,12 @@ public class LifeAssistantApp {
 
     @Resource
     private SupervisorSleepTimeMemoryAgent supervisorSleepTimeMemoryAgent;
+
+    @Resource
+    private SecretManager secretManager;
+
+    @Resource
+    private PendingPermissionRegistry pendingPermissionRegistry;
 
     public List<AgentSummary> listAgents() {
         return agentRegistry.listAgents();
@@ -98,8 +106,11 @@ public class LifeAssistantApp {
         // supervisor 拿到委派能力；worker 只拿到执行能力。
         ToolCallback[] tools = profile.supervisor() ? supervisorTools : workerTools;
         AgentProfile runtimeProfile = profile.supervisor() ? withDynamicAgentCatalog(profile) : profile;
-        return new LifeManusAgent(runtimeProfile, tools, dashscopeChatModel, stringRedisTemplate,
-                myRetrievalAugmentAdvisor, lifeMemoryService, chatMemoryCompressAgent);
+        LifeManusAgent agent = new LifeManusAgent(runtimeProfile, tools, dashscopeChatModel, stringRedisTemplate,
+                myRetrievalAugmentAdvisor, lifeMemoryService, chatMemoryCompressAgent, secretManager);
+        // 注入待处理权限注册表，用于 cleanup 时清理会话下未响应的权限请求
+        agent.setPendingPermissionRegistry(pendingPermissionRegistry);
+        return agent;
     }
 
     private AgentProfile withDynamicAgentCatalog(AgentProfile profile) {
