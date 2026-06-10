@@ -88,7 +88,9 @@ public class LifeMemoryService {
                 .contentSanitizer(secretManager::scrub)
                 .build();
         // 独立于 RAG 文档表 vector_store，避免用户长期记忆和内置知识库混在一起。
-        this.archivalMemoryStore = PgVectorStore.builder(jdbcTemplate, dashscopeEmbeddingModel)
+        // 这里不是 Spring Bean，Spring 不会自动调用 PgVectorStore.afterPropertiesSet()。
+        // initializeSchema(true) 的建表逻辑就在 afterPropertiesSet() 中，所以手动构造后必须主动初始化。
+        PgVectorStore archivalStore = PgVectorStore.builder(jdbcTemplate, dashscopeEmbeddingModel)
                 .dimensions(1024)
                 .distanceType(COSINE_DISTANCE)
                 .indexType(HNSW)
@@ -97,6 +99,8 @@ public class LifeMemoryService {
                 .vectorTableName("life_archival_memory")
                 .maxDocumentBatchSize(10000)
                 .build();
+        archivalStore.afterPropertiesSet();
+        this.archivalMemoryStore = archivalStore;
     }
 
     public String renderCoreMemory(String chatId) {
