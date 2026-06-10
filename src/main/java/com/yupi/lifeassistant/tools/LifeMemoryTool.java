@@ -78,6 +78,18 @@ public class LifeMemoryTool {
     }
 
     @Tool(description = """
+            Search shared memory blocks visible to all agents in this chat.
+            Use when you need team-level user profile, global preferences, task board, team context, or delegation results.
+            Shared memory is also injected into the system prompt every turn; this tool is for focused lookup.
+            """)
+    public String sharedMemorySearch(
+            @ToolParam(description = "Keyword or phrase to search for") String query,
+            @ToolParam(description = "Maximum number of matching shared blocks, default 3 and maximum 5") int limit,
+            ToolContext toolContext) {
+        return lifeMemoryService.searchSharedMemory(requireChatId(toolContext), query, limit);
+    }
+
+    @Tool(description = """
             Store information in archival memory.
             Use for long notes, discovered facts, research snippets, and details worth saving but not worth keeping in core memory.
             """)

@@ -23,6 +23,9 @@ import java.util.concurrent.CompletableFuture;
 @Slf4j
 public abstract class BaseAgent {
 
+    private static final int STREAM_CHUNK_SIZE = 8;
+    private static final long STREAM_CHUNK_DELAY_MILLIS = 20L;
+
     private String name;
     private String systemPrompt;
     private String nextStepPrompt;
@@ -122,7 +125,8 @@ public abstract class BaseAgent {
             }
             String response = getUserVisibleResponse();
             persistFinalAssistantMessage(response);
-            emitter.send(response);
+            streamTextResponse(emitter, response);
+            emitter.send(SseEmitter.event().name("done").data("[DONE]"));
             completedSuccessfully = true;
             emitter.complete();
         } catch (Exception e) {
@@ -147,6 +151,29 @@ public abstract class BaseAgent {
             completionCallback.run();
         } catch (Exception e) {
             log.warn("{} stream completion callback failed", name, e);
+        }
+    }
+
+    private void streamTextResponse(SseEmitter emitter, String response) throws IOException {
+        if (StrUtil.isBlank(response)) {
+            return;
+        }
+        int index = 0;
+        while (index < response.length()) {
+            int nextIndex = Math.min(response.length(), index + STREAM_CHUNK_SIZE);
+            emitter.send(SseEmitter.event().data(response.substring(index, nextIndex)));
+            index = nextIndex;
+            if (index < response.length()) {
+                sleepBetweenStreamChunks();
+            }
+        }
+    }
+
+    private void sleepBetweenStreamChunks() {
+        try {
+            Thread.sleep(STREAM_CHUNK_DELAY_MILLIS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -214,7 +241,6 @@ public abstract class BaseAgent {
         if (lifeMemoryService == null || StrUtil.isBlank(chatId)) {
             return systemPrompt;
         }
-        // Core Memory 每轮都进入 system prompt，这是 Letta memory blocks 的主要入口。
         // 每轮把 shared memory + 当前 Agent 的 private core memory 拼进 system prompt，
         // 这是 Letta memory blocks 在本项目里的主要入口。
         return systemPrompt + "\n\n" + lifeMemoryService.renderMemoryContext(chatId);

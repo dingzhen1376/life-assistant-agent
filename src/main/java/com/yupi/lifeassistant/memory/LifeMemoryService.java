@@ -52,6 +52,7 @@ public class LifeMemoryService {
     private static final String CORE_MEMORY_KEY_PREFIX = "life:memory:core:";
     private static final String QUEUE_SUMMARY_KEY_PREFIX = "life:memory:queue:summary:";
     private static final String QUEUE_COMPRESSED_COUNT_KEY_PREFIX = "life:memory:queue:compressed-count:";
+    private static final String USER_COUNT_KEY_PREFIX = "life:memory:sleeptime:user-count:";
     private static final String ARCHIVAL_MEMORY_TYPE = "archival";
     private static final String SKILLS_BLOCK_NAME = "skills";
     private static final int MAX_CORE_BLOCK_CHARS = 4000;
@@ -251,6 +252,34 @@ public class LifeMemoryService {
         return "Shared memory replaced: " + normalizedBlockName;
     }
 
+    public String searchSharedMemory(String conversationId, String query, int limit) {
+        String normalizedQuery = normalizeContent(query, "query");
+        int maxResults = clampLimit(limit);
+        List<String> tokens = tokenize(normalizedQuery);
+        Map<String, String> blocks = getSharedMemory(conversationId);
+        List<String> matches = new ArrayList<>();
+
+        for (Map.Entry<String, String> entry : blocks.entrySet()) {
+            String blockName = entry.getKey();
+            String blockText = StrUtil.blankToDefault(entry.getValue(), "");
+            String searchableText = (blockName + "\n" + blockText).toLowerCase(Locale.ROOT);
+            boolean matched = tokens.stream().anyMatch(searchableText::contains);
+            if (!matched) {
+                continue;
+            }
+            String snippet = blockText.length() > 1200 ? blockText.substring(0, 1200) + "..." : blockText;
+            matches.add("[shared.%s]\n%s".formatted(blockName, StrUtil.blankToDefault(snippet, "(empty)")));
+            if (matches.size() >= maxResults) {
+                break;
+            }
+        }
+
+        if (matches.isEmpty()) {
+            return "No matching shared memory found.";
+        }
+        return secretManager.scrub(String.join("\n\n", matches));
+    }
+
     // 更新整个 core memory block，避免让模型传 exact oldText 带来的匹配不稳定。
     public String replaceCoreMemory(String chatId, String blockName, String newText) {
         String normalizedBlockName = normalizeBlockName(blockName);
@@ -385,6 +414,7 @@ public class LifeMemoryService {
         for (String conversationId : idsToDelete) {
             redisKeys.add(QUEUE_SUMMARY_KEY_PREFIX + conversationId);
             redisKeys.add(QUEUE_COMPRESSED_COUNT_KEY_PREFIX + conversationId);
+            redisKeys.add(USER_COUNT_KEY_PREFIX + conversationId);
         }
 
         Long deletedRedisKeys = stringRedisTemplate.delete(redisKeys);

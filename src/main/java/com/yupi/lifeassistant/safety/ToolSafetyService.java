@@ -29,6 +29,7 @@ public class ToolSafetyService {
             "listAvailableSkills",
             "findRelevantSkills",
             "readSkill",
+            "sharedMemorySearch",
             "archivalMemorySearch",
             "conversationSearch",
             "listAvailableAgents"

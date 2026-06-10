@@ -3,6 +3,8 @@ const DEFAULT_API_BASE = "/api";
 
 const state = loadState();
 let activeEventSource = null;
+let streamCompleted = false;
+const resolvedPermissionRequestIds = new Set();
 /** 权限轮询定时器，流式生成期间每秒查询一次是否有待确认的工具权限 */
 let permissionPollTimer = null;
 
@@ -137,6 +139,7 @@ function sendMessage(text) {
   });
   const url = `${state.apiBase || DEFAULT_API_BASE}/ai/life/chat/sse?${params.toString()}`;
 
+  streamCompleted = false;
   activeEventSource = new EventSource(url);
   els.connectionState.textContent = "生成中";
 
@@ -154,7 +157,18 @@ function sendMessage(text) {
     persist();
   };
 
+  activeEventSource.addEventListener("done", () => {
+    streamCompleted = true;
+    stopStreaming();
+    renderMessages();
+    persist();
+  });
+
   activeEventSource.onerror = () => {
+    if (streamCompleted) {
+      stopStreaming();
+      return;
+    }
     if (!assistantMessage.content.trim()) {
       assistantMessage.content = "连接失败。请确认后端、Redis 和 Nginx 代理已经启动，并检查 API 地址配置。";
     } else {
@@ -359,7 +373,7 @@ function formatSseChunk(chunk) {
     .replaceAll("\\r\\n", "\n")
     .replaceAll("\\n", "\n")
     .replaceAll("\\t", "  ");
-  return normalized.endsWith("\n") ? normalized : `${normalized}\n`;
+  return normalized;
 }
 
 function scrollMessagesToBottom() {
@@ -408,6 +422,13 @@ function migrateThreads() {
     }
     if (!Array.isArray(thread.messages)) {
       thread.messages = [];
+      changed = true;
+    }
+    const visibleMessages = thread.messages.filter((message) =>
+      message.role !== "permission" || message.status === "pending"
+    );
+    if (visibleMessages.length !== thread.messages.length) {
+      thread.messages = visibleMessages;
       changed = true;
     }
     if (!thread.title) {
@@ -507,6 +528,9 @@ function handlePermissionEvent(jsonData) {
   } catch {
     return;
   }
+  if (perm.requestId && resolvedPermissionRequestIds.has(perm.requestId)) {
+    return;
+  }
   const thread = currentThread();
   // 如果同一请求的卡片已在展示中，跳过（轮询去重）
   if (thread.messages.some((m) => m.role === "permission" && m.status === "pending" && m.requestId === perm.requestId)) {
@@ -535,7 +559,8 @@ async function resolvePermission(action, messageIdx) {
   if (!msg || msg.role !== "permission" || msg.status !== "pending") {
     return;
   }
-  msg.status = action === "ALLOW" ? "allowed" : "denied";
+  resolvedPermissionRequestIds.add(msg.requestId);
+  thread.messages.splice(messageIdx, 1);
   renderMessages();
   persist();
 
@@ -583,6 +608,7 @@ function startPermissionPolling(rootChatId) {
       let perm;
       try { perm = JSON.parse(text); } catch { return; }
       if (!perm.requestId || !perm.chatId) return;
+      if (resolvedPermissionRequestIds.has(perm.requestId)) return;
       // 同一个请求不重复弹窗
       if (shownRequestIds.has(perm.requestId)) return;
       shownRequestIds.add(perm.requestId);

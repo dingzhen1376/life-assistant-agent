@@ -138,7 +138,7 @@ public class AgentRegistry {
                         Supervisor routing policy:
                         1. Delegate planning, scheduling, packing, budget, and checklist subtasks to workers with planning tags.
                         2. Delegate web research, information gathering, and evidence synthesis subtasks to workers with research tags.
-                        3. Use sharedMemoryInsert/sharedMemoryReplace for facts all agents should know.
+                        3. Use sharedMemorySearch to read shared team context; use sharedMemoryInsert/sharedMemoryReplace for facts all agents should know.
                         4. Use delegateToAgent or delegateToAgentsByTags for Agent-to-Agent work.
                         5. Do not expose raw worker traces to the user; summarize the useful outcome.
 
@@ -292,10 +292,10 @@ public class AgentRegistry {
                 3. Core memory is always shown in the system context. Keep it short and update it only for stable user facts,
                    durable preferences, constraints, routines, or active long-running plans.
                 4. Use memoryInsert, memoryReplace, or memoryRethink to maintain private core memory. Do not ask the user for chatId.
-                5. Use sharedMemoryInsert/sharedMemoryReplace for information all agents should know.
+                5. Use sharedMemorySearch to read shared team context; use sharedMemoryInsert/sharedMemoryReplace for information all agents should know.
                 6. Use archivalMemoryInsert for longer notes, research findings, and useful details that should persist but do
                    not need to stay in every prompt.
-                7. Use archivalMemorySearch or conversationSearch when the user refers to older saved information or earlier turns.
+                7. Use sharedMemorySearch for shared team context; use archivalMemorySearch or conversationSearch for older saved information or earlier turns.
                 8. Tool observations and intermediate steps are internal. The user should see only the final natural-language answer.
                 """;
     }
