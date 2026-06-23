@@ -6,7 +6,7 @@ spring:
       api-key: ${ai.my-api-key}
       chat:
         options:
-          model: qwen-plus-2025-09-11
+          model: qwen-max
 #    因为手动引入pgvector，而不是自动装配AutoConfig，所以下面这些配置直接在pgvector里面手动配置，不用写在application了，手动更灵活，可以自定义
 #    vectorstore:
 #      pgvector:

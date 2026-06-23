@@ -1,247 +1,182 @@
-# Letta 风格上下文记忆管理阅读指南
+# 对话记忆与上下文管理
 
-这份文档只解释本项目中和 Letta 风格记忆管理相关的改造代码。推荐按下面顺序阅读，不要一开始就从工具类或压缩类深挖，否则容易看不清调用链。
+本文说明当前项目中对话消息、上下文窗口、核心记忆、共享记忆和归档记忆的实际实现，以及一次 Agent 运行期间这些数据如何读写和清理。
 
-## 1. 先看整体入口
+## 1. 记忆分层
 
-### `LifeAssistantController`
+| 层级 | 存储 | Key / 表 | 作用域 | 是否默认进入 prompt |
+| --- | --- | --- | --- | --- |
+| 对话记忆 | Redis List | `chat:memory:{conversationId}` | 单个 Agent 的单次对话 | 活跃窗口部分进入 |
+| 滚动摘要 | Redis String | `life:memory:queue:summary:{conversationId}` | 单个 Agent 的单次对话 | 是 |
+| 压缩游标 | Redis String | `life:memory:queue:compressed-count:{conversationId}` | 单个 Agent 的单次对话 | 否 |
+| 核心记忆 | Redis Hash | `life:memory:core:{agentId}` | 单个 Agent 的所有对话 | 是 |
+| 共享记忆 | Redis Hash | `life:memory:shared:{rootChatId}` | 同一 root 对话内所有 Agent | 是 |
+| 归档记忆 | PGVector | `public.life_archival_memory` | 写入时使用的 conversationId | 按需检索 |
+| 文档知识 | PGVector | `public.vector_store` | 全局 | 由 RAG Advisor 检索 |
 
-路径：
+这些层解决的问题不同：
 
-```text
-src/main/java/com/yupi/lifeassistant/controller/LifeAssistantController.java
-```
+- 对话记忆保留原始交互和工具过程，便于继续对话、检索和调试。
+- 滚动摘要控制真正进入模型的历史长度。
+- 核心记忆保存 Agent 跨对话复用的稳定信息。
+- 共享记忆为 Supervisor 与 Worker 提供同一会话的公共工作区。
+- 归档记忆保存不需要每轮常驻、但未来可能再次检索的材料。
 
-作用：
+## 2. chatId 与 conversationId
 
-- 接收前端请求。
-- 保证每次请求都有 `chatId`。
-- 把 `message + chatId` 传给 `LifeAssistantApp`。
-
-这里要关注的是：同一个对话必须使用同一个 `chatId`，因为 Redis 对话记忆、shared memory 和 FIFO 压缩摘要都以 `chatId` 作为对话隔离维度。Core Memory 现在按 `agentId` 隔离，用于保存同一个 Agent 跨对话复用的长期记忆。
-
-### `LifeAssistantApp`
-
-路径：
-
-```text
-src/main/java/com/yupi/lifeassistant/app/LifeAssistantApp.java
-```
-
-作用：
-
-- 每次请求创建一个新的 `LifeManusAgent`。
-- 给 Agent 注入工具、模型、Redis、RAG Advisor、记忆服务和压缩器。
-
-重点看 `createAgent()`，它是整个 Agent 运行时依赖的组装点。
-
-## 2. 再看 Agent 主流程
-
-### `BaseAgent`
-
-路径：
+前端创建对话时生成 UUID，并在同一对话的每次请求中复用：
 
 ```text
-src/main/java/com/yupi/lifeassistant/agent/BaseAgent.java
+rootChatId = 4a7e...-uuid
 ```
 
-作用：
-
-- 管理 Agent 生命周期：`IDLE -> RUNNING -> FINISHED / ERROR`。
-- 保存当前请求的 `chatId`。
-- 把 `chatId` 绑定到 `AgentRunContext`。
-- 运行 ReAct 循环。
-- 在 cleanup 阶段清理本轮状态。
-
-重点方法：
+`LifeAssistantApp` 根据当前 Agent 派生内部 conversationId：
 
 ```text
-run(...)
-runStream(...)
-getSystemPromptWithMemory()
-cleanup()
+life-coordinator:{rootChatId}
+life-planner:{rootChatId}
+life-researcher:{rootChatId}
+life-manus:{rootChatId}
 ```
 
-其中 `getSystemPromptWithMemory()` 是 Core Memory 进入上下文的入口。
-
-### `ToolCallAgent`
-
-路径：
+作用域规则：
 
 ```text
-src/main/java/com/yupi/lifeassistant/agent/ToolCallAgent.java
+对话记忆、滚动摘要、归档记忆 -> conversationId
+核心记忆                     -> agentId
+共享记忆                     -> rootChatId
 ```
 
-作用：
+因此，同一 root 对话中的不同 Agent 拥有独立对话历史，但能读取同一份共享记忆。一个 Agent 在不同 root 对话中会复用自己的核心记忆。
 
-- 实现 ReAct 中的 `think + act`。
-- `think()` 调模型决定是否调用工具。
-- `act()` 执行工具调用。
-
-重点看：
+当前没有 userId 维度。多用户部署前，核心记忆至少应扩展为：
 
 ```text
-think()
+life:memory:core:{userId}:{agentId}
 ```
 
-这里会调用：
+## 3. 一次请求的记忆流程
+
+```mermaid
+flowchart TD
+    A["用户提交 UserPrompt + rootChatId"] --> B["LifeAssistantApp 派生 conversationId"]
+    B --> C["BaseAgent 记录本轮开始前的原始消息数量"]
+    C --> D["加入 UserMessage"]
+    D --> E["构建 system prompt"]
+    E --> F["共享记忆 + 核心记忆 + 可用密钥名称"]
+    F --> G["ContextQueueManager 构建对话上下文"]
+    G --> H["较早历史摘要 + 活跃消息"]
+    H --> I["ToolCallAgent think / act"]
+    I --> J["每次工具执行后完整保存当前消息列表"]
+    J --> K{"是否结束"}
+    K -->|"否"| I
+    K -->|"是"| L["保存最终 Assistant 消息"]
+    L --> M["按配置清理本轮中间工具消息"]
+    M --> N["再次更新滚动摘要"]
+```
+
+`BaseAgent.getSystemPromptWithMemory()` 每轮调用 `LifeMemoryService.renderMemoryContext(conversationId)`，拼接顺序为：
+
+```text
+AgentProfile system prompt
++ shared memory blocks
++ 当前 Agent core memory blocks
++ 允许引用的 secret 名称
+```
+
+## 4. Redis 对话消息
+
+### 4.1 自定义仓库
+
+`RedisChatMemoryRepository` 实现 Spring AI `ChatMemoryRepository`，使用以下结构：
+
+```text
+chat:memory:conversations             Redis Set
+chat:memory:{conversationId}          Redis List
+```
+
+消息序列化格式为：
+
+```text
+MESSAGE_TYPE<TAB>escaped-content
+```
+
+支持 `USER`、`ASSISTANT`、`SYSTEM` 和工具响应。工具调用的 `AssistantMessage` 与紧随其后的 `ToolResponseMessage` 会合并保存为一条内部 Assistant 记录。
+
+### 4.2 工具消息先保存再清理
+
+`ToolCallAgent.act()` 调用：
 
 ```java
-.system(getSystemPromptWithMemory())
+ToolExecutionResult result = toolCallingManager.executeToolCalls(prompt, response);
+setMessageList(result.conversationHistory());
+persistToolExecutionHistory();
 ```
 
-也就是说，模型每次思考时都能看到：
+因此工具调用过程会先完整写入 Redis。典型本轮结构为：
 
 ```text
-原始 System Prompt + Core Memory
+USER 原始问题
+ASSISTANT 工具调用与结果
+USER NextStepPrompt
+ASSISTANT 工具调用与结果
+USER NextStepPrompt
+ASSISTANT 最终自然语言结果
 ```
 
-## 3. 看 LifeManusAgent 如何接入记忆系统
+仓库提供两种读取方式：
 
-路径：
+- `findRawByConversationId()`：包含内部工具轨迹，用于本轮覆盖保存和清理计数。
+- `findByConversationId()`：过滤工具名、调用 ID、参数和原始返回等内部轨迹，避免重新进入模型上下文或用户回答。
 
-```text
-src/main/java/com/yupi/lifeassistant/agent/LifeManusAgent.java
-```
+### 4.3 cleanup
 
-这里是最重要的组装点。
-
-重点看三块：
-
-### 3.1 System Prompt 中的记忆规则
-
-`LifeManusAgent` 的 system prompt 里写了 Memory Policy，告诉模型：
-
-- 什么该进入 Core Memory。
-- 什么该进入 Archival Memory。
-- 什么时候搜索 Recall Memory。
-- 工具中间结果不应该直接展示给用户。
-
-### 3.2 Core Memory Service 注入
+`BaseAgent.cleanIntermediateToolMessages` 默认为 `true`。Agent 结束后：
 
 ```java
-this.setLifeMemoryService(lifeMemoryService);
+deleteCount = 2 * (currentStep - 1)
 ```
 
-这让 `BaseAgent.getSystemPromptWithMemory()` 可以渲染 Core Memory。
+`deleteMessagesBeforeLastAssistant()` 从最后一条 Assistant 消息向前删除对应数量的中间消息，最终保留对话主干。清理发生在最终 Assistant 已写入之后，因此运行过程中仍能看到完整工具消息。
 
-### 3.3 LettaChatMemory 替代 MessageWindowChatMemory
+如果将 `cleanIntermediateToolMessages` 设为 `false`，则保留所有中间工具记录。
 
-```java
-ContextQueueManager contextQueueManager =
-        new ContextQueueManager(redisChatMemoryRepository, chatMemoryCompressAgent);
-ChatMemory chatMemory = new LettaChatMemory(contextQueueManager);
-```
+`cleanup()` 还会：
 
-原来是 Spring AI 的 `MessageWindowChatMemory(maxMessages=100)`，现在换成自定义的：
+- 更新本 conversationId 的滚动摘要和压缩游标。
+- 取消该会话尚未处理的权限请求。
+- 清理 `AgentRunContext`、当前步骤和运行内消息列表。
+
+## 5. 活跃上下文与 FIFO 压缩
+
+### 5.1 ContextQueueManager
+
+`ContextQueueManager` 负责两件事：
+
+- `enqueue()`：把 Spring AI 新消息追加到自定义 Redis 仓库。
+- `buildContext()`：调用压缩器后，只返回滚动摘要和未压缩的活跃消息。
+
+构建结果：
 
 ```text
-LettaChatMemory -> ContextQueueManager -> ChatMemoryCompressAgent
+SystemMessage(较早对话的滚动摘要)
++ Redis 中 compressedCount 之后的消息
 ```
 
-这就是 FIFO Queue 和 Queue Manager 的接入点。
+Redis 原始历史不会因窗口压缩而删除，压缩器只推进游标。
 
-## 4. 看 FIFO Queue Manager
+### 5.2 ChatMemoryCompressAgent
 
-### `LettaChatMemory`
+默认参数：
 
-路径：
+| 配置 | 默认值 | 作用 |
+| --- | ---: | --- |
+| `max-active-messages` | 30 | 活跃消息数量阈值 |
+| `keep-recent-messages` | 16 | 永远保留的最近原文消息数 |
+| `compress-batch-messages` | 10 | 每批压缩数量 |
+| `max-active-chars` | 18000 | 活跃消息字符阈值 |
 
-```text
-src/main/java/com/yupi/lifeassistant/memory/LettaChatMemory.java
-```
-
-作用：
-
-- 适配 Spring AI 的 `ChatMemory` 接口。
-- 本身不做复杂逻辑，只把调用转给 `ContextQueueManager`。
-
-对应关系：
-
-```text
-ChatMemory.add(...) -> ContextQueueManager.enqueue(...)
-ChatMemory.get(...) -> ContextQueueManager.buildContext(...)
-ChatMemory.clear(...) -> ContextQueueManager.clear(...)
-```
-
-### `ContextQueueManager`
-
-路径：
-
-```text
-src/main/java/com/yupi/lifeassistant/memory/ContextQueueManager.java
-```
-
-作用：
-
-- 管理对话消息 FIFO 队列。
-- 写入时，把新消息追加到 Redis 全量对话历史。
-- 读取时，触发压缩器检查上下文压力。
-- 返回真正要塞进模型上下文的消息列表。
-
-重点方法：
-
-```text
-enqueue(...)
-buildContext(...)
-```
-
-`enqueue(...)` 做的是入队：
-
-```text
-旧消息 + 新消息 -> saveAll 到 Redis
-```
-
-`buildContext(...)` 做的是上下文构建：
-
-```text
-1. 调用 ChatMemoryCompressAgent.compress(chatId)
-2. 根据 compressedCount 截取 FIFO 队尾活跃消息
-3. 如果存在 rolling summary，则把 summary 作为 SystemMessage 放在活跃消息前面
-```
-
-模型看到的是：
-
-```text
-Compressed recall summary
-+ 最近未压缩消息
-+ 当前请求消息
-```
-
-## 5. 看压缩机制
-
-### `ChatMemoryCompressAgent`
-
-路径：
-
-```text
-src/main/java/com/yupi/lifeassistant/agent/ChatMemoryCompressAgent.java
-```
-
-这是仿照 Letta / MemGPT 思路补全的压缩器。
-
-它不会删除 Redis 中的完整历史，而是维护两个额外状态：
-
-```text
-life:memory:queue:summary:{chatId}
-life:memory:queue:compressed-count:{chatId}
-```
-
-含义：
-
-- `summary`：已经从活跃上下文移出的旧消息滚动摘要。
-- `compressed-count`：前多少条消息已经被压缩过。
-
-重点方法：
-
-```text
-compress(...)
-shouldCompress(...)
-summarize(...)
-fallbackSummary(...)
-```
-
-压缩触发条件：
+触发条件：
 
 ```text
 活跃消息数 > max-active-messages
@@ -249,86 +184,18 @@ fallbackSummary(...)
 活跃消息字符数 > max-active-chars
 ```
 
-默认配置：
-
-```yaml
-life-assistant:
-  memory:
-    queue:
-      max-active-messages: 30
-      keep-recent-messages: 16
-      compress-batch-messages: 8
-      max-active-chars: 18000
-```
-
-压缩时的行为：
+每次从 FIFO 队首选择可压缩批次，把旧摘要和本批消息合并成新的 rolling summary，然后更新：
 
 ```text
-1. 从 FIFO 队首取一批旧消息。
-2. 把旧 rolling summary 和这批旧消息一起交给模型。
-3. 模型返回新的 rolling summary。
-4. compressed-count 增加 batchSize。
-5. 后续 buildContext 时，这些旧消息不再进入活跃上下文。
+life:memory:queue:summary:{conversationId}
+life:memory:queue:compressed-count:{conversationId}
 ```
 
-如果模型压缩失败，会走 `fallbackSummary(...)`，避免整个对话因为压缩失败而中断。
+模型压缩失败时使用本地兜底摘要，避免因为压缩服务异常中断主对话。
 
-### 5.1 Supervisor Sleep-time Memory Agent
+## 6. 核心记忆
 
-路径：
-
-```text
-src/main/java/com/yupi/lifeassistant/agent/SupervisorSleepTimeMemoryAgent.java
-```
-
-这是仿照 Letta Sleep-time Agent 增加的后台记忆编辑器。它不参与前台 ReAct loop，也不会把整理过程流式输出给用户，而是在 supervisor 对话完成后异步运行。
-
-触发链路：
-
-```text
-LifeAssistantApp.chat / chatStream
-  -> 判断当前 profile 是否是 supervisor
-  -> SupervisorSleepTimeMemoryAgent.onSupervisorConversationCompleted(...)
-  -> Redis INCR 记录 supervisor 用户消息累计数
-  -> 每达到 trigger-user-messages 阈值才启动后台任务
-  -> 读取最近 supervisor 对话 + 当前 supervisor core memory
-  -> 模型返回 JSON 更新决策
-  -> LifeMemoryService.replaceCoreMemory(...) 写回 core memory
-```
-
-默认策略：
-
-```yaml
-life-assistant:
-  memory:
-    sleeptime:
-      trigger-user-messages: 20
-      recent-message-limit: 80
-      lock-minutes: 10
-```
-
-注意点：
-
-- 它只处理 `life-coordinator:{chatId}` 形式的 supervisor conversationId。
-- Redis 计数发生在前台对话完成之后；真正的记忆整理通过 `CompletableFuture.runAsync(...)` 后台执行。
-- 更新前会先读取旧 core memory，并让模型判断是否真的需要改，避免每 20 条消息机械写入。
-- 只允许更新 `persona`、`human`、`preferences`、`working`，`skills` block 仍由系统自动维护。
-
-## 6. 看三层记忆服务
-
-### `LifeMemoryService`
-
-路径：
-
-```text
-src/main/java/com/yupi/lifeassistant/memory/LifeMemoryService.java
-```
-
-它负责三类记忆：
-
-### 6.1 Core Memory
-
-Redis Hash：
+核心记忆 Key：
 
 ```text
 life:memory:core:{agentId}
@@ -336,241 +203,210 @@ life:memory:core:{agentId}
 
 默认 block：
 
+| Block | 用途 |
+| --- | --- |
+| `persona` | Agent 的长期行为补充 |
+| `human` | 稳定的用户事实 |
+| `preferences` | 长期偏好和约束 |
+| `working` | 持续任务与当前长期状态 |
+| `skills` | 可用 Skill 的名称和简短描述 |
+
+`skills` 由 `AgentSkillRepository` 自动生成，每次初始化核心记忆时刷新。模型不能通过 `memoryInsert`、`memoryReplace` 或 `memoryRethink` 覆盖该 block，完整 Skill 内容由 `readSkill(skillId)` 按需读取。
+
+核心 block 最大长度为 4000 字符。所有写入先经过 `SecretManager.scrub(...)`。
+
+适合写入核心记忆：
+
+- 稳定饮食偏好、过敏或长期限制。
+- 经常使用的计划习惯和输出偏好。
+- 持续项目中需要跨对话保留的状态。
+
+不适合写入：
+
+- 单次工具返回。
+- 临时错误、调用 ID、调试日志。
+- 只对当前 root 对话有效的 Worker 协作状态。
+
+## 7. 共享记忆
+
+共享记忆 Key：
+
+```text
+life:memory:shared:{rootChatId}
+```
+
+默认 block：
+
+| Block | 用途 |
+| --- | --- |
+| `user_profile` | 当前会话中所有 Agent 都需要的用户信息 |
+| `global_preferences` | 当前任务的全局偏好和约束 |
+| `team_context` | 多 Agent 公共事实和背景 |
+| `task_board` | 子任务和进度 |
+| `delegation_results` | Worker 委派结果摘要 |
+
+`life-coordinator:{id}` 与 `life-planner:{id}` 都会提取相同 root ID，因此读写同一个 Redis Hash。
+
+`LifeMemoryTool` 提供：
+
+```text
+sharedMemoryInsert
+sharedMemoryReplace
+sharedMemorySearch
+```
+
+每个共享 block 最大长度为 12000 字符。`sharedMemorySearch` 当前使用轻量关键词匹配，默认返回 3 个 block，最多返回 5 个。
+
+`AgentCoordinator` 写入 `delegation_results` 时会控制大小：
+
+- 单条任务超过 500 字符时先做语义压缩。
+- 单条结果超过 2000 字符时先做语义压缩。
+- block 合并后达到 9000 字符时，将旧内容与最新结果压缩到约 5000 字符并整体替换。
+- 只有模型压缩失败时才使用本地长度兜底。
+
+## 8. 归档记忆
+
+归档记忆使用独立 PGVector 表：
+
+```text
+public.life_archival_memory
+```
+
+`LifeMemoryService` 手动构造 `PgVectorStore`，参数为：
+
+```text
+dimensions: 1024
+distance: COSINE_DISTANCE
+index: HNSW
+initializeSchema: true
+schema: public
+table: life_archival_memory
+```
+
+因为该 Store 不是 Spring Bean，构造后会显式调用 `afterPropertiesSet()` 来执行建表初始化。
+
+写入内容超过 3000 字符时按 200 字符重叠分块。metadata 包含：
+
+```text
+memory_type
+chat_id
+memory_id
+chunk_index
+chunk_count
+tags
+created_at
+```
+
+检索使用当前 conversationId 过滤，similarity threshold 为 `0.35`，结果数量最多 5 条。
+
+归档记忆适合保存网页结论、较长资料摘要和未来可能再次检索的细节；它不会默认常驻每轮 prompt。
+
+## 9. 后台核心记忆整理
+
+`SupervisorSleepTimeMemoryAgent` 在 Supervisor 请求完成后被通知，主响应不会等待它执行。
+
+默认触发配置：
+
+```yaml
+life-assistant:
+  memory:
+    sleeptime:
+      trigger-user-messages: 20
+      recent-message-limit: 40
+      lock-minutes: 10
+```
+
+流程：
+
+```text
+Supervisor 对话完成
+  -> 会话计数 +1
+  -> 每达到 20 次触发
+  -> Redis setIfAbsent 获取带 TTL 的锁
+  -> 异步读取最近 40 条可见消息
+  -> 读取 life-coordinator 的旧核心记忆
+  -> 模型返回结构化更新决策
+  -> 仅在确有稳定信息时替换允许的 block
+  -> 释放锁
+```
+
+只允许更新：
+
 ```text
 persona
 human
 preferences
 working
-skills
 ```
 
-Core Memory 每轮都会进入 system prompt，并且不随单次对话切换；例如 `life-planner` 的 core memory 会在该 Agent 的所有对话中复用。
+`skills` 不在可编辑集合中。没有稳定新信息、内容未变化或输出无效时不会写 Redis。
 
-`skills` 是系统自动维护的 core memory block，只保存 skill 的 `name + description`。这样模型每轮都知道可用 skill，但完整 `SKILL.md` 内容不会常驻上下文，需要时再通过 `readSkill(skillId)` 加载。
-
-Core / shared / archival memory 写入前会经过 `SecretManager.scrub(...)`。如果内容中出现真实 secret 值，会被替换成 `$SECRET_NAME` 或 redacted marker；memory 可以保存“需要使用 `$DASHSCOPE_API_KEY`”这种名称引用，但不保存真实密钥。
-
-### 6.2 Recall Memory
-
-复用原来的 Redis 对话历史：
+相关 Key：
 
 ```text
-chat:memory:{chatId}
+life:memory:sleeptime:user-count:{supervisorConversationId}
+life:memory:sleeptime:lock:{supervisorConversationId}
 ```
 
-通过 `searchConversation(...)` 做关键词检索。
-写入 Redis 前同样会做 secret scrub，避免 recall memory 长期保存真实 secret。
+## 10. ToolContext
 
-### 6.3 Archival Memory
-
-独立 PGVector 表：
-
-```text
-life_archival_memory
-```
-
-用于存储长期、较大、按需检索的记忆。
-
-注意：它和 RAG 文档表 `vector_store` 是分开的。
-
-## 7. 看记忆工具
-
-### `LifeMemoryTool`
-
-路径：
-
-```text
-src/main/java/com/yupi/lifeassistant/tools/LifeMemoryTool.java
-```
-
-暴露给模型使用的记忆工具：
-
-```text
-memoryInsert
-memoryReplace
-memoryRethink
-archivalMemoryInsert
-archivalMemorySearch
-conversationSearch
-```
-
-这些工具不要求模型传 `chatId`，而是通过：
+会话相关工具不能依赖普通方法参数让模型传入 chatId。`ToolCallAgent.bindToolContext()` 在每次 think/act 前设置：
 
 ```java
-AgentRunContext.getChatId(toolContext)
+toolCallingChatOptions.setToolContext(
+    AgentRunContext.toolContext(activeConversationId)
+);
 ```
 
-从 Spring AI `ToolContext` 拿当前会话 ID。
+`LifeMemoryTool` 和 `AgentDelegationTool` 从 `ToolContext` 读取 conversationId。模型只传业务参数，不能伪造或遗漏会话标识。线程内上下文仅用于兼容和权限事件推送。
 
-### `AgentRunContext`
+## 11. 删除对话
 
-路径：
+前端删除 root 对话时调用：
 
 ```text
-src/main/java/com/yupi/lifeassistant/agent/AgentRunContext.java
+DELETE /api/ai/life/conversations/{rootChatId}
 ```
 
-作用：
+`LifeAssistantApp` 为所有已注册 Agent 生成 conversationId，`LifeMemoryService.deleteConversation()` 清理：
 
-- 定义写入 `ToolContext` 的 chatId key。
-- 保留 `ThreadLocal` 作为同线程运行链的兼容兜底。
-- 让工具调用时能自动知道当前属于哪个会话，而不需要模型显式传 `chatId`。
+- root ID 和所有 Agent conversationId 的 `chat:memory:*`。
+- `life:memory:shared:{rootChatId}`。
+- 每个 conversationId 的滚动摘要和压缩游标。
+- 每个 conversationId 的后台整理计数。
+- `life_archival_memory` 中 metadata `chat_id` 匹配的记录。
 
-## 8. 看工具注册
+不会删除 `life:memory:core:{agentId}`，因为核心记忆是 Agent 级长期状态，不属于某一个 root 对话。后台锁带 TTL，即使未显式删除也会自动过期。
 
-### `ToolRegistration`
+## 12. 密钥边界
 
-路径：
+以下内容在写入 Redis、PGVector、文件和日志前会脱敏：
 
-```text
-src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
-```
+- 已加载的真实密钥值。
+- Bearer Token。
+- 常见 `api_key`、`secret`、`token` 表达式。
+- 常见 API Key 格式。
 
-这里把 `LifeMemoryTool` 注册进 Agent 工具列表。
+记忆中可以保存 `$DASHSCOPE_API_KEY` 这样的名称引用，不能保存真实值。
 
-重点看：
+## 13. 推荐阅读顺序
 
-```java
-new LifeMemoryTool(lifeMemoryService)
-```
+1. `LifeAssistantApp`
+2. `BaseAgent`
+3. `ToolCallAgent`
+4. `RedisChatMemoryRepository`
+5. `ContextQueueManager`
+6. `ChatMemoryCompressAgent`
+7. `LifeMemoryService`
+8. `LifeMemoryTool`
+9. `AgentRunContext`
+10. `SupervisorSleepTimeMemoryAgent`
+11. `AgentCoordinator`
 
-如果这里没注册，模型就无法调用记忆工具。
+## 14. 当前边界
 
-## 9. 完整调用链
-
-一次普通 SSE 对话的大致流程：
-
-```text
-前端发送 message + chatId
-  -> LifeAssistantController
-  -> LifeAssistantApp.createAgent()
-  -> BaseAgent.runStream()
-  -> AgentRunContext.setChatId(chatId)
-  -> ToolCallAgent.think()
-  -> getSystemPromptWithMemory()
-  -> MessageChatMemoryAdvisor.before()
-  -> LettaChatMemory.get()
-  -> ContextQueueManager.buildContext()
-  -> ChatMemoryCompressAgent.compress()
-  -> 返回 rolling summary + FIFO 队尾消息
-  -> 模型决定直接回答或调用工具
-  -> 如果调用记忆工具，LifeMemoryTool 通过 ToolContext 获取 chatId
-  -> 最终自然语言结果返回前端
-  -> BaseAgent.cleanup()
-```
-
-## 10. 推荐断点位置
-
-调试这套机制时，推荐按顺序打断点：
-
-```text
-LifeAssistantController.chatStream(...)
-LifeAssistantApp.createAgent()
-BaseAgent.runStreamInternal(...)
-ToolCallAgent.think()
-BaseAgent.getSystemPromptWithMemory()
-LettaChatMemory.get(...)
-ContextQueueManager.buildContext(...)
-ChatMemoryCompressAgent.compress(...)
-ChatMemoryCompressAgent.summarize(...)
-LifeMemoryTool.memoryInsert(...)
-LifeMemoryService.renderCoreMemory(...)
-```
-
-如果你想看 FIFO 是否生效，重点看：
-
-```text
-ChatMemoryCompressAgent.compress(...)
-```
-
-里面的：
-
-```text
-compressedCount
-activeCount
-batchSize
-rollingSummary
-```
-
-## 11. Redis Key 速查
-
-```text
-chat:memory:{chatId}
-```
-
-完整对话历史，供 RedisChatMemoryRepository 使用。
-
-```text
-life:memory:core:{agentId}
-```
-
-Core Memory，始终进入 system prompt。
-
-```text
-life:memory:queue:summary:{chatId}
-```
-
-FIFO 旧消息压缩后的滚动摘要。
-
-```text
-life:memory:queue:compressed-count:{chatId}
-```
-
-已经被压缩移出活跃上下文的消息数量。
-
-```text
-life:memory:sleeptime:user-count:{life-coordinator}:{chatId}
-```
-
-Supervisor Sleep-time Agent 的用户消息累计计数。
-
-```text
-life:memory:sleeptime:lock:{life-coordinator}:{chatId}
-```
-
-Supervisor Sleep-time Agent 的后台整理锁，防止同一会话并发整理。
-
-```text
-life_archival_memory
-```
-
-PGVector 中的长期向量记忆表。
-
-## 12. 和 Letta 的对应关系
-
-| Letta 概念 | 本项目实现 |
-| --- | --- |
-| Core Memory / Memory Blocks | `LifeMemoryService.renderCoreMemory()` + Redis Hash |
-| Skills Memory Block | Core memory `[skills]` block + `AgentSkillRepository.renderCoreMemorySkillBlock()` |
-| Recall Memory | `RedisChatMemoryRepository` + `conversationSearch` |
-| Archival Memory | `life_archival_memory` PGVector 表 |
-| FIFO Queue | `ContextQueueManager.enqueue()` 保存完整队列 |
-| Queue Manager | `ContextQueueManager.buildContext()` |
-| Context Compression | `ChatMemoryCompressAgent.compress()` |
-| Sleep-time Agent | `SupervisorSleepTimeMemoryAgent` 异步整理 supervisor core memory |
-| Memory Tools | `LifeMemoryTool` |
-| Per-agent state isolation | `agentId` for Core Memory, `agentId:chatId` for recall/FIFO context |
-
-## 13. 阅读顺序总结
-
-建议顺序：
-
-```text
-1. LifeAssistantController
-2. LifeAssistantApp
-3. BaseAgent
-4. ToolCallAgent
-5. LifeManusAgent
-6. LettaChatMemory
-7. ContextQueueManager
-8. ChatMemoryCompressAgent
-9. SupervisorSleepTimeMemoryAgent
-10. LifeMemoryService
-11. LifeMemoryTool
-12. AgentRunContext
-13. ToolRegistration
-14. RedisChatMemoryRepository
-15. RetrievalAugmentAdvisorPlus / PgVectorStoreConfig
-```
-
-前 9 个文件负责 Letta 风格上下文管理和 sleep-time 后台学习主链路；后面的文件负责记忆工具、持久化和 RAG 的外围能力。
+- 核心记忆按 Agent 而不是按用户隔离。
+- 对话搜索和共享记忆搜索是关键词匹配，不是向量检索。
+- 归档记忆按 conversationId 隔离，Worker 与 Supervisor 默认不会跨 conversationId 直接检索彼此的归档记录。
+- 上下文压缩不删除 Redis 原始历史；是否保留中间工具记录由 `cleanIntermediateToolMessages` 决定。
+- 后台整理使用默认异步执行器，尚未接入持久化任务队列和失败重试队列。

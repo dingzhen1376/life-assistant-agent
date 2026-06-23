@@ -1,5 +1,13 @@
 const STORAGE_KEY = "life-manus-frontend-state";
 const DEFAULT_API_BASE = "/api";
+const TOOL_PERMISSION_MODES = [
+  { value: "DEFAULT", label: "请求批准", detail: "每次工具调用前询问" },
+  { value: "ACCEPT_EDITS", label: "接受编辑", detail: "文件编辑自动允许" },
+  { value: "PLAN", label: "计划模式", detail: "只读工具可执行" },
+  { value: "BYPASS", label: "自动允许", detail: "大部分工具自动执行" },
+  { value: "YOLO", label: "YOLO", detail: "最高风险自动模式" },
+];
+const TOOL_PERMISSION_MODE_VALUES = new Set(TOOL_PERMISSION_MODES.map((mode) => mode.value));
 
 const state = loadState();
 let activeEventSource = null;
@@ -26,6 +34,9 @@ const els = {
   apiBaseInput: document.getElementById("apiBaseInput"),
   saveSettingsBtn: document.getElementById("saveSettingsBtn"),
   connectionState: document.getElementById("connectionState"),
+  toolModeBtn: document.getElementById("toolModeBtn"),
+  toolModeLabel: document.getElementById("toolModeLabel"),
+  toolModeMenu: document.getElementById("toolModeMenu"),
 };
 
 init();
@@ -38,6 +49,8 @@ function init() {
   }
   renderThreads();
   renderMessages();
+  renderToolModeMenu();
+  updateToolModeUi();
   bindEvents();
   pingHealth();
 }
@@ -106,6 +119,8 @@ function bindEvents() {
     persist();
     pingHealth();
   });
+
+  bindToolModeEvents();
 
   document.querySelectorAll(".prompt-chip").forEach((button) => {
     button.addEventListener("click", () => {
@@ -447,6 +462,7 @@ function loadState() {
     return {
       apiBase: normalizeApiBase(parsed.apiBase || DEFAULT_API_BASE),
       theme: parsed.theme || "light",
+      toolPermissionMode: normalizeToolMode(parsed.toolPermissionMode || "DEFAULT"),
       activeThreadId: parsed.activeThreadId || null,
       threads: Array.isArray(parsed.threads) ? parsed.threads : [],
     };
@@ -454,6 +470,7 @@ function loadState() {
     return {
       apiBase: DEFAULT_API_BASE,
       theme: "light",
+      toolPermissionMode: "DEFAULT",
       activeThreadId: null,
       threads: [],
     };
@@ -496,9 +513,142 @@ async function pingHealth() {
       method: "GET",
       cache: "no-store",
     });
-    els.connectionState.textContent = response.ok ? "就绪" : "接口异常";
+    if (response.ok) {
+      const health = await response.json().catch(() => null);
+      if (health?.toolPermissionMode) {
+        state.toolPermissionMode = normalizeToolMode(health.toolPermissionMode);
+        updateToolModeUi();
+        persist();
+      }
+      els.connectionState.textContent = "就绪";
+    } else {
+      els.connectionState.textContent = "接口异常";
+    }
   } catch {
     els.connectionState.textContent = "未连接";
+  }
+}
+
+function normalizeToolMode(value) {
+  const normalized = String(value || "DEFAULT")
+    .trim()
+    .replaceAll("-", "_")
+    .toUpperCase();
+  if (normalized === "ACCEPTEDITS") {
+    return "ACCEPT_EDITS";
+  }
+  return TOOL_PERMISSION_MODE_VALUES.has(normalized) ? normalized : "DEFAULT";
+}
+
+function toolModeMeta(value) {
+  const normalized = normalizeToolMode(value);
+  return TOOL_PERMISSION_MODES.find((mode) => mode.value === normalized) || TOOL_PERMISSION_MODES[0];
+}
+
+function renderToolModeMenu() {
+  if (!els.toolModeMenu) {
+    return;
+  }
+  els.toolModeMenu.innerHTML = "";
+  TOOL_PERMISSION_MODES.forEach((mode) => {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "tool-mode-option";
+    option.dataset.toolMode = mode.value;
+    option.setAttribute("role", "menuitemradio");
+    option.innerHTML = `<span class="tool-mode-option-main">${escapeHtml(mode.label)}</span>
+      <span class="tool-mode-option-detail">${escapeHtml(mode.detail)}</span>
+      <span class="tool-mode-option-check" aria-hidden="true">✓</span>`;
+    els.toolModeMenu.appendChild(option);
+  });
+}
+
+function updateToolModeUi() {
+  if (!els.toolModeBtn || !els.toolModeLabel || !els.toolModeMenu) {
+    return;
+  }
+  const mode = toolModeMeta(state.toolPermissionMode);
+  els.toolModeLabel.textContent = mode.label;
+  els.toolModeBtn.title = `工具权限模式：${mode.label}`;
+  els.toolModeMenu.querySelectorAll(".tool-mode-option").forEach((option) => {
+    const active = option.dataset.toolMode === mode.value;
+    option.classList.toggle("active", active);
+    option.setAttribute("aria-checked", String(active));
+  });
+}
+
+function bindToolModeEvents() {
+  if (!els.toolModeBtn || !els.toolModeMenu) {
+    return;
+  }
+  els.toolModeBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const open = els.toolModeMenu.hidden;
+    els.toolModeMenu.hidden = !open;
+    els.toolModeBtn.setAttribute("aria-expanded", String(open));
+  });
+
+  els.toolModeMenu.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-tool-mode]");
+    if (!option) {
+      return;
+    }
+    setToolPermissionMode(option.dataset.toolMode);
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".tool-mode-picker")) {
+      closeToolModeMenu();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeToolModeMenu();
+    }
+  });
+}
+
+function closeToolModeMenu() {
+  if (!els.toolModeBtn || !els.toolModeMenu) {
+    return;
+  }
+  els.toolModeMenu.hidden = true;
+  els.toolModeBtn.setAttribute("aria-expanded", "false");
+}
+
+async function setToolPermissionMode(modeValue) {
+  const mode = normalizeToolMode(modeValue);
+  const previousMode = normalizeToolMode(state.toolPermissionMode);
+  closeToolModeMenu();
+  if (mode === previousMode) {
+    return;
+  }
+
+  state.toolPermissionMode = mode;
+  updateToolModeUi();
+  persist();
+  els.connectionState.textContent = "切换模式中";
+
+  try {
+    const params = new URLSearchParams({ mode });
+    const response = await fetch(
+      `${state.apiBase || DEFAULT_API_BASE}/ai/life/tool-permission-mode?${params.toString()}`,
+      { method: "POST", cache: "no-store" }
+    );
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json().catch(() => null);
+    state.toolPermissionMode = normalizeToolMode(payload?.toolPermissionMode || mode);
+    updateToolModeUi();
+    persist();
+    els.connectionState.textContent = "就绪";
+  } catch {
+    state.toolPermissionMode = previousMode;
+    updateToolModeUi();
+    persist();
+    els.connectionState.textContent = "模式切换失败";
   }
 }
 

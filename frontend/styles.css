@@ -400,6 +400,10 @@ button {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
 }
 
+.composer textarea {
+  grid-column: 1 / -1;
+}
+
 textarea {
   width: 100%;
   max-height: 180px;
@@ -413,7 +417,106 @@ textarea {
   padding: 7px 4px;
 }
 
+.composer-tools {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.tool-mode-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.tool-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.tool-mode-btn:hover,
+.tool-mode-btn[aria-expanded="true"] {
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.tool-mode-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tool-mode-chevron {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.tool-mode-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  display: grid;
+  gap: 4px;
+  width: min(280px, calc(100vw - 48px));
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.tool-mode-option {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 32px 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.tool-mode-option:hover,
+.tool-mode-option.active {
+  background: var(--surface);
+}
+
+.tool-mode-option-main {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.tool-mode-option-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tool-mode-option-check {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  display: none;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.tool-mode-option.active .tool-mode-option-check {
+  display: block;
+}
+
 .composer-actions {
+  grid-column: 2;
   display: flex;
   gap: 8px;
 }

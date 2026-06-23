@@ -1,601 +1,319 @@
 # Life Assistant Agent
 
-`life-assistant-agent` 是一个基于 Java 的超级生活助手 Agent 项目。后端使用 Spring Boot、Spring AI、DashScope、Redis、PostgreSQL PGVector，整体执行风格参考 OpenManus 的 ReAct + Tool Calling，并在记忆管理和多 Agent 协作上借鉴 Letta / MemGPT。
+`life-assistant-agent` 是一个基于 Java 21、Spring Boot、Spring AI 和 DashScope 的生活助手后端。项目提供多 Agent 协作、工具调用、流式对话、分层记忆、RAG、Skill、工具权限确认、密钥脱敏和受限代码执行，并附带由 Nginx 托管的静态聊天前端。
 
-项目当前包含：
+## 当前能力
 
-- 后端 Agent 服务：`src/main/java/com/yupi/lifeassistant`
-- 静态前端页面：`frontend`
-- Nginx 本地代理配置：`frontend/nginx.conf`、`frontend/start-nginx.ps1`
-- 生活知识 RAG 文档：`src/main/resources/document`
-- Letta-style Skill 资源：`src/main/resources/skills`
-- 记忆管理说明：`README-MEMORY.md`
-- 多 Agent 说明：`README-MULTI-AGENT.md`
-- 安全机制说明：`README-SAFETY.md`
+- 使用 `life-coordinator` 作为默认入口，按任务内容直接回答或委派给专用 Worker。
+- 使用 Spring AI Tool Calling 执行文件、网页、计划、待办、预算、记忆、Skill 和代码工具。
+- 通过 SSE 只向用户流式输出最终自然语言结果，步骤结果保留在后端日志和内部消息中。
+- 使用 Redis 保存完整对话、上下文压缩状态、Agent 核心记忆和会话共享记忆。
+- 使用 PostgreSQL + PGVector 保存内置生活知识和长期归档记忆。
+- 在前端显示工具权限确认卡片，并支持运行时切换工具权限模式。
+- 支持删除对话，同时清理对应 Redis 对话、共享记忆、压缩状态和 PGVector 归档记录。
+- 每累计 20 条 Supervisor 用户消息，异步整理一次长期核心记忆，不阻塞当前响应。
 
 ## 技术栈
 
-| 模块 | 技术 |
+| 模块 | 实现 |
 | --- | --- |
-| Web 框架 | Spring Boot 3.5.11 |
-| Java 版本 | Java 21 |
-| Agent / LLM 编排 | Spring AI |
-| 模型服务 | DashScope |
-| 当前聊天模型 | `qwen-plus-2025-07-28` |
-| 对话记忆 | Redis + 自定义 `RedisChatMemoryRepository` |
-| RAG 向量库 | PostgreSQL + PGVector |
-| 长期向量记忆 | 独立 PGVector 表 `life_archival_memory` |
-| Markdown 文档读取 | `spring-ai-markdown-document-reader` |
-| 工具调用 | Spring AI Tool Calling |
-| 安全机制 | Tool permission wrapper + sandboxed runCode + secret scrub |
-| API 文档 | springdoc-openapi + Knife4j |
-| 前端 | 原生 HTML / CSS / JavaScript |
-| 本地代理 | Nginx，默认监听 `8080` |
+| 运行时 | Java 21、Spring Boot 3.5.11 |
+| Agent 编排 | Spring AI 1.1.2、Spring AI Alibaba 1.1.2.0 |
+| 模型 | DashScope `qwen-max` |
+| 对话与状态 | Redis |
+| 关系与向量存储 | PostgreSQL、PGVector |
+| 文档解析 | Spring AI Markdown Document Reader |
+| 网页解析 | Jsoup |
+| API 文档 | Knife4j、Springdoc OpenAPI |
+| 前端 | HTML、CSS、JavaScript、Nginx |
 
-## 总体架构
+## 系统结构
+
+```mermaid
+flowchart TD
+    UI["Web Frontend"] -->|"SSE + chatId"| API["LifeAssistantController"]
+    API --> APP["LifeAssistantApp"]
+    APP --> REG["AgentRegistry"]
+    APP --> AGENT["LifeManusAgent"]
+    AGENT --> LOOP["BaseAgent / ToolCallAgent"]
+    LOOP --> MODEL["DashScope ChatModel"]
+    LOOP --> TOOLS["Secured ToolCallbacks"]
+    TOOLS --> WORKER["AgentCoordinator"]
+    WORKER --> REG
+    LOOP --> REDIS["Redis Memory"]
+    LOOP --> VECTOR["PGVector"]
+    VECTOR --> RAG["Knowledge + Archival Memory"]
+```
+
+一次流式请求的主链路：
 
 ```text
-Frontend / API Client
-  -> Nginx /api proxy
-  -> Spring Boot Controller
-  -> LifeAssistantApp
-  -> LifeCoordinator(supervisor)
-  -> ReAct Loop
-  -> DashScope ChatModel
-  -> Tool Calling / RAG / Memory / Delegation
-  -> Final natural-language answer
+GET /api/ai/life/chat/sse
+  -> LifeAssistantController
+  -> LifeAssistantApp 根据 agentId 取得 AgentProfile
+  -> root chatId 转换为 agentId:rootChatId
+  -> LifeManusAgent.runStream(...)
+  -> ToolCallAgent.think()
+  -> 模型直接回答或选择工具
+  -> ToolCallingManager.executeToolCalls(...)
+  -> SecureToolCallback 权限判断
+  -> 真实 ToolCallback 执行
+  -> Agent 循环继续
+  -> 最终自然语言按小块发送给前端
+  -> cleanup 清理中间工具消息并更新压缩状态
 ```
 
-后端入口：
+## Agent 体系
 
-```text
-src/main/java/com/yupi/lifeassistant/LifeAssistantApplication.java
-src/main/java/com/yupi/lifeassistant/controller/LifeAssistantController.java
-src/main/java/com/yupi/lifeassistant/app/LifeAssistantApp.java
-```
+`AgentRegistry` 当前注册 4 个 Agent：
 
-## Multi-Agent 机制
+| Agent ID | 角色 | 主要职责 |
+| --- | --- | --- |
+| `life-coordinator` | Supervisor | 拆分任务、选择 Worker、维护共享记忆、汇总最终结果 |
+| `life-manus` | Worker | 通用生活任务、跨工具执行 |
+| `life-planner` | Worker | 日程、待办、出行、预算和清单 |
+| `life-researcher` | Worker | 网页资料、知识检索、信息提炼和归档 |
 
-项目当前不是单一固定 Agent，而是使用 `AgentRegistry` 管理多个 Agent 身份。
+Supervisor 的 Worker 清单由 `AgentRegistry` 在创建运行实例时动态加入 system prompt，也可以通过 `listAvailableAgents` 工具重新查询。新增 Worker 后无需同步维护一份固定清单。
 
-当前内置 Agent：
+Supervisor 使用 `supervisorTools`，Worker 使用 `workerTools`。两组工具的主要差异是 Worker 不包含 `AgentDelegationTool`，因此不会递归委派。
 
-| agentId | name | role | tags |
-| --- | --- | --- | --- |
-| `life-coordinator` | `LifeCoordinator` | supervisor | `supervisor, coordinator, life` |
-| `life-manus` | `LifeManus` | worker | `worker, general, life` |
-| `life-planner` | `LifePlanner` | worker | `worker, planning, schedule, budget, todo, travel, life` |
-| `life-researcher` | `LifeResearcher` | worker | `worker, research, web, rag, archive, life` |
-
-默认 Agent：
-
-```java
-AgentRegistry.DEFAULT_AGENT_ID = "life-coordinator"
-```
-
-也就是说，不传 `agentId` 时，请求默认进入 `LifeCoordinator`，由 supervisor 判断是否直接回答、调用工具，或委派给 worker。
-
-### 动态 Agent Catalog
-
-Supervisor 可用的 worker 列表不写死在 prompt 里，而是由 `AgentRegistry` 动态提供：
-
-```java
-AgentRegistry.describeAvailableAgents()
-AgentRegistry.renderAvailableWorkersForPrompt()
-AgentDelegationTool.listAvailableAgents()
-```
-
-运行时：
-
-1. `LifeAssistantApp` 创建 supervisor 时，会把当前 `AgentRegistry` 中的 worker 清单动态追加到 system prompt。
-2. supervisor 也可以调用 `listAvailableAgents()` 工具再次查询当前可用 Agent。
-3. 新增 worker 时，优先在 `AgentRegistry` 新增 `AgentProfile`，supervisor 会自动感知。
-
-更完整说明见 [README-MULTI-AGENT.md](README-MULTI-AGENT.md)。
-
-## Agent-to-Agent Delegation
-
-Agent-to-Agent 通过 `AgentDelegationTool` 暴露给 supervisor。
-
-当前工具：
-
-```java
-listAvailableAgents()
-delegateToAgent(String targetAgentId, String task)
-delegateToAgentsByTags(String matchAllTags, String matchSomeTags, String task)
-```
-
-调用链：
-
-```text
-LifeCoordinator
-  -> AgentDelegationTool
-  -> AgentCoordinator
-  -> AgentRegistry 查找 worker profile
-  -> new LifeManusAgent(workerProfile, workerTools, ...)
-  -> worker 执行子任务
-  -> worker 结果写入 shared memory
-  -> supervisor 汇总最终答复
-```
-
-`workerTools` 不包含 `AgentDelegationTool`，所以 worker 不能继续递归委派，避免调用链失控。
+详细机制见 [README-MULTI-AGENT.md](README-MULTI-AGENT.md)。
 
 ## Agent 执行循环
 
-核心代码在：
-
-```text
-src/main/java/com/yupi/lifeassistant/agent
-```
-
-主要类：
-
 | 类 | 职责 |
 | --- | --- |
-| `BaseAgent` | 生命周期、ReAct 循环、SSE 输出、cleanup |
-| `ReActAgent` | 定义 `think()` / `act()` 抽象流程 |
-| `ToolCallAgent` | 使用模型决策并执行工具调用 |
-| `LifeManusAgent` | 按 `AgentProfile` 装配具体运行实例 |
-| `AgentRegistry` | 管理 supervisor / worker 静态身份 |
-| `AgentCoordinator` | 执行 supervisor-worker 委派 |
-| `AgentRunContext` | 为工具调用提供 `ToolContext` 上下文 key，保留 `ThreadLocal` 兜底 |
-| `ChatMemoryCompressAgent` | Letta 风格上下文压缩 |
-| `SupervisorSleepTimeMemoryAgent` | Letta 风格后台记忆编辑器，异步更新 supervisor 的 core memory |
+| `BaseAgent` | 生命周期、循环步数、SSE、最终消息保存、清理和上下文压缩 |
+| `ReActAgent` | 定义 `think()` 与 `act()` 两阶段流程 |
+| `ToolCallAgent` | 调用模型、识别 Tool Call、执行工具并维护当前消息列表 |
+| `LifeManusAgent` | 根据 `AgentProfile` 装配模型、Advisor、工具和记忆 |
+| `AgentRunContext` | 将 conversationId、SSE emitter 放入 `ToolContext`，并保留线程内兜底上下文 |
 
-当前输出策略是：中间 step 和工具结果主要用于后端日志和调试，用户看到的是最终自然语言回答。
+第一步只使用原始 `UserPrompt`；从第二步开始才追加 `nextStepPrompt`。工具步骤只写日志和内部消息，用户最终看到的是整理后的自然语言回答。
 
-## 工具系统
+## 工具
 
-工具注册在：
+当前注册的主要工具：
 
-```text
-src/main/java/com/yupi/lifeassistant/tools/ToolRegistration.java
-```
-
-当前主要工具：
-
-| 工具 | 能力 |
+| 工具类 | 能力 |
 | --- | --- |
-| `LifeFileTool` | 读写生活助手工作区文件 |
-| `WebScrapingTool` | 抓取公开网页文本 |
-| `LifePlannerTool` | 生成日程、饮食、穿搭、出行清单 |
-| `TodoArchiveTool` | 待办归档 |
-| `BudgetTool` | 预算统计 |
-| `SkillTool` | Letta-style skill 列表、检索和读取 |
-| `LifeMemoryTool` | core / shared / archival / conversation memory |
-| `SandboxedCodeTool` | 受限 Java/jshell 沙箱代码执行 |
-| `AgentDelegationTool` | supervisor 专用的 Agent-to-Agent 工具 |
-| `TerminateTool` | 结束 Agent 任务 |
+| `LifeFileTool` | 在工作目录内读取、写入和追加 UTF-8 文件 |
+| `WebScrapingTool` | 抓取网页正文 |
+| `LifePlannerTool` | 日程、饮食、穿搭和出行清单 |
+| `TodoArchiveTool` | 待办整理和归档 |
+| `BudgetTool` | 预算汇总 |
+| `SkillTool` | Skill 列表、检索和按需加载 |
+| `LifeMemoryTool` | 核心、共享、归档和对话记忆 |
+| `SandboxedCodeTool` | 受限 Java/JShell 计算 |
+| `AgentDelegationTool` | Supervisor 专用的 Worker 查询和任务委派 |
+| `TerminateTool` | 结束当前 Agent 循环 |
 
-工具集分为两套：
+所有工具在注册后都会被 `SecureToolCallback` 包装，模型拿到的是安全包装后的 `ToolCallback[]`。
 
-| 工具集 | 使用者 | 特点 |
-| --- | --- | --- |
-| `workerTools` | worker agents | 不包含 `AgentDelegationTool` |
-| `supervisorTools` | supervisor agent | 包含 `AgentDelegationTool` |
+## Skill
 
-## 安全机制
-
-项目新增了 Letta 风格安全层，核心思想是所有工具调用先经过统一权限判断，再决定执行、要求确认或拒绝。
-
-配置入口：
-
-```yaml
-life-assistant:
-  safety:
-    tool-permission-mode: default # default / accept-edits / plan / bypass / yolo
-```
-
-主要组件：
-
-| 类 | 职责 |
-| --- | --- |
-| `ToolSafetyService` | 根据工具名和权限模式判断 allow / ask / deny |
-| `SecureToolCallback` | 包装 Spring AI `ToolCallback`，在真正执行前拦截 |
-| `SandboxedCodeTool` | 在受限 jshell 环境中执行小段 Java 代码 |
-| `SecretManager` | secret placeholder 注入和输出脱敏 |
-
-安全边界：
-
-- `default`：除 `doTerminate` 外，每个工具调用都要求确认。
-- `accept-edits`：文件编辑自动允许，memory 写入、委派、代码执行仍询问。
-- `plan`：只读/纯计算模式，不允许副作用工具。
-- `bypass` / `yolo`：大部分自动允许，风险最高，但工具自身的沙箱、路径检查、SSRF 阻断和 secret scrub 仍生效。
-- Secret 在 prompt / memory 中只暴露名称，例如 `$DASHSCOPE_API_KEY`；真实值只允许在 `runCode` 执行前临时注入，stdout / stderr / tool response 会再脱敏。
-
-完整说明见 [README-SAFETY.md](README-SAFETY.md)。
-
-## Skill 系统
-
-项目新增了一个 Letta-style skill 层，用来把可复用的 Agent 操作规范沉淀成独立 `SKILL.md` 文件。
-
-当前实现会把 skill 的 `name + description` 自动写入 core memory 的 `[skills]` block。这样模型每轮都知道自己有哪些 skill，不需要先调用工具查询目录；完整 `SKILL.md` 内容仍然不会常驻 prompt，只有真正需要时才通过 `readSkill(skillId)` 加载。
-
-代码位置：
-
-```text
-src/main/java/com/yupi/lifeassistant/skill
-```
-
-资源位置：
+Skill 资源位于：
 
 ```text
 src/main/resources/skills/{skillId}/SKILL.md
 ```
 
-核心类：
+当前内置 Skill：
 
-| 类 | 职责 |
+| Skill ID | 内容 |
 | --- | --- |
-| `AgentSkill` | 运行时的 skill 数据结构 |
-| `AgentSkillRepository` | 启动时加载 `SKILL.md`，解析 frontmatter，提供简单相关性检索 |
-| `SkillTool` | 暴露 `listAvailableSkills`、`findRelevantSkills`、`readSkill` 给 Agent 调用 |
+| `memory-engineering` | 记忆写入、去重、压缩和冲突处理 |
+| `multi-agent-delegation` | 任务拆分、Worker 选择和结果合成 |
+| `agent-to-agent-protocol` | 任务消息、状态、重试、升级和交接 |
+| `tool-use-safety` | 工具权限、写操作、沙箱和密钥规则 |
+| `agent-evaluation` | 约束检查、记忆检查、事实风险和结果复核 |
 
-当前内置 skill：
+`AgentSkillRepository` 启动时动态扫描所有 `SKILL.md`。核心记忆中的 `skills` block 只保存名称和简短描述，完整内容由 `readSkill(skillId)` 按需加载，避免每轮注入全部规则。
 
-| skillId | 关注点 |
+## 记忆与上下文
+
+| 层级 | 存储 | 作用域 | 用途 |
+| --- | --- | --- | --- |
+| 对话记忆 | Redis List | `agentId:rootChatId` | 用户消息、工具过程和 Assistant 消息 |
+| 队列摘要 | Redis String | `agentId:rootChatId` | 压缩较早的对话，控制活跃上下文大小 |
+| 核心记忆 | Redis Hash | `agentId` | Agent 跨对话复用的长期状态 |
+| 共享记忆 | Redis Hash | `rootChatId` | 同一对话内 Supervisor 与 Worker 的公共上下文 |
+| 归档记忆 | PGVector | conversationId | 可按语义检索的长期材料 |
+| RAG 知识库 | PGVector | 全局文档 | `resources/document` 中的生活知识 |
+
+核心记忆默认包含 `persona`、`human`、`preferences`、`working`、`skills`。`skills` 由系统维护，记忆工具不能覆盖。
+
+详细流程、Redis Key 和清理规则见 [README-MEMORY.md](README-MEMORY.md)。
+
+## RAG 与 PGVector
+
+项目手动构造两个 `PgVectorStore`：
+
+| 表 | 内容 |
 | --- | --- |
-| `memory-engineering` | Memory write, search, dedupe, compression, and conflict rules. |
-| `multi-agent-delegation` | Supervisor-worker task routing and result synthesis rules. |
-| `agent-to-agent-protocol` | Agent message schema, task status, handoff, retry, and escalation. |
-| `tool-use-safety` | Tool risk checks, permissions, secrets, retries, and destructive actions. |
-| `agent-evaluation` | Final quality review for constraints, memory, delegation, and hallucination risk. |
+| `public.vector_store` | 内置 Markdown 生活知识 |
+| `public.life_archival_memory` | Agent 写入的长期归档记忆 |
 
-调用方式：
+两者都使用 1024 维向量、余弦距离和 HNSW 索引。配置位于 Java 代码中，不依赖 `spring.ai.vectorstore.pgvector` 自动装配项。
 
-```text
-listAvailableSkills()
-findRelevantSkills(String query, int limit)
-readSkill(String skillId)
-```
+`PgVectorStoreConfig` 会加载 `src/main/resources/document/*.md`，通过稳定 ID 和内容哈希判断新增、修改和删除，并按配置决定是否自动同步。
 
-其中 `listAvailableSkills` 和 `findRelevantSkills` 仍保留为工具能力，但常规情况下模型可以直接根据 `[skills]` block 选择 `readSkill(skillId)`。
+## 安全机制
 
-设计取舍：
+工具权限模式：
 
-- `SKILL.md` 保持为资源文件，便于像 Letta 官方 skill 仓库一样独立维护。
-- core memory 的 `[skills]` block 只保存 skill 名称和简短 description，不保存完整正文。
-- `[skills]` block 由系统自动维护，模型不能通过 memory 工具覆盖。
-- `AgentSkillRepository` 启动时动态扫描 `classpath*:skills/*/SKILL.md`，新增 skill 目录不需要改 Java 常量。
-- system prompt 不默认注入所有 skill 全文，避免污染上下文。
-- `findRelevantSkills` 使用轻量关键词检索，因为当前 skill 数量少且都是人工维护。
-- `SkillTool` 同时注册到 `workerTools` 和 `supervisorTools`，worker 和 supervisor 都可以按需读取操作规范。
-
-## 记忆与上下文管理
-
-项目使用 Letta 风格的分层记忆：
-
-```text
-Shared Memory
-Core Memory
-Recall Memory
-Archival Memory
-FIFO active context
-Compressed summary
-```
-
-### Shared Memory
-
-同一 root `chatId` 下所有 Agent 共享：
-
-```text
-life:memory:shared:{rootChatId}
-```
-
-默认 blocks：
-
-```text
-user_profile
-global_preferences
-team_context
-task_board
-delegation_results
-```
-
-用于保存 supervisor 和 worker 都应该知道的信息，例如任务状态、全局偏好、委派结果。
-
-### Agent Core Memory
-
-每个 Agent 自己的长期稳定记忆。它不再按单次 `chatId` 隔离，而是按 `agentId` 共享，所以同一个 Agent 在不同对话中会看到同一份 core memory：
-
-```text
-life:memory:core:{agentId}
-```
-
-默认 blocks：
-
-```text
-persona
-human
-preferences
-working
-skills
-```
-
-其中 `skills` 是系统自动维护的 block，内容来自 `src/main/resources/skills/*/SKILL.md` 的 `name` 和 `description`，用于让模型每轮知道可用 skill。完整 skill 内容仍通过 `readSkill(skillId)` 按需读取。
-
-### Supervisor Sleep-time Memory
-
-项目新增了一个仿 Letta Sleep-time Agent 的后台记忆编辑器：
-
-```text
-LifeAssistantApp
-  -> SupervisorSleepTimeMemoryAgent
-  -> Redis 计数 / 锁
-  -> 读取最近 supervisor 对话
-  -> 读取旧 core memory
-  -> DashScope 判断是否需要更新
-  -> LifeMemoryService.replaceCoreMemory(...)
-```
-
-它只针对 `life-coordinator` 这个 supervisor 生效。前台对话完成后只做一次轻量 Redis 计数；当用户累计新增 `20` 条消息时，后台异步启动记忆整理，不阻塞 SSE 输出和普通对话返回。
-
-默认配置：
-
-```yaml
-life-assistant:
-  memory:
-    sleeptime:
-      trigger-user-messages: 20
-      recent-message-limit: 80
-      lock-minutes: 10
-```
-
-更新范围只允许 `persona`、`human`、`preferences`、`working`，不会覆盖系统维护的 `skills` block。
-
-### Recall Memory
-
-完整对话历史保存在 Redis：
-
-```text
-chat:memory:{agentId}:{chatId}
-```
-
-由自定义 `RedisChatMemoryRepository` 负责序列化、反序列化、搜索和 cleanup。
-
-### Archival Memory
-
-长期向量记忆写入独立 PGVector 表：
-
-```text
-life_archival_memory
-```
-
-它和 RAG 知识库表 `vector_store` 分开，避免用户长期记忆和内置知识库混在一起。
-
-### FIFO 压缩
-
-上下文窗口由以下组件管理：
-
-```text
-LettaChatMemory
-  -> ContextQueueManager
-  -> ChatMemoryCompressAgent
-```
-
-模型实际看到的大致结构：
-
-```text
-System Prompt
-+ Dynamic Agent Catalog(supervisor only)
-+ Shared Memory Blocks
-+ Private Core Memory Blocks (including skills index)
-+ Compressed Recall Summary
-+ FIFO active messages
-+ Current UserPrompt
-```
-
-更完整说明见 [README-MEMORY.md](README-MEMORY.md)。
-
-## RAG 知识库
-
-RAG 相关代码在：
-
-```text
-src/main/java/com/yupi/lifeassistant/rag
-```
-
-核心类：
-
-| 类 | 职责 |
+| 模式 | 行为 |
 | --- | --- |
-| `LifeDocumentLoader` | 加载 `resources/document/*.md` |
-| `LifeDocumentTransformer` | 增强和转换文档 |
-| `DocumentVersionTracker` | 跟踪文档 hash，支持增量更新 |
-| `PgVectorStoreConfig` | 手动创建 PGVector Store |
-| `RetrievalAugmentAdvisorPlus` | 组装 RAG Advisor |
+| `DEFAULT` | 除终止工具外，每次调用都要求用户确认 |
+| `ACCEPT_EDITS` | 只读、计算和文件编辑自动允许；记忆写入、委派、代码和未知工具仍确认 |
+| `PLAN` | 只读和计算工具允许；有副作用的工具直接拒绝 |
+| `BYPASS` | 大部分工具自动允许，工具自身限制仍生效 |
+| `YOLO` | 与 `BYPASS` 相同的高风险自动执行模式 |
 
-内置文档目录：
+前端输入框下方可切换模式。切换调用后端运行时接口，仅修改当前进程内的 `SafetyProperties`；应用重启后重新读取 `application.yml`。
 
-```text
-src/main/resources/document
-```
+安全模块还包括：
 
-RAG 向量表：
+- 权限请求通过 SSE `permission` 事件推送，前端轮询作为兜底。
+- 权限请求等待 120 秒，未处理则自动拒绝。
+- 文件工具限制路径必须位于配置的 workspace 内。
+- `runCode` 仅支持受限 Java/JShell，使用独立目录、最小环境、超时和输出长度限制。
+- 密钥只以名称进入 prompt 和持久化数据，执行前按白名单临时注入，输出和日志再次脱敏。
+- 内部工具调用 ID、参数和返回信息不会进入最终用户回答。
 
-```text
-vector_store
-```
+详细说明见 [README-SAFETY.md](README-SAFETY.md)。
 
-PGVector 当前是手动集成，不使用 `spring-ai-starter-vector-store-pgvector` 自动装配；索引类型、距离函数、维度等在代码里指定。
-
-## 前端与 Nginx
-
-前端在：
-
-```text
-frontend
-```
-
-主要文件：
-
-| 文件 | 说明 |
-| --- | --- |
-| `index.html` | 页面结构 |
-| `styles.css` | ChatGPT 风格布局 |
-| `app.js` | SSE 对话、thread、chatId、本地状态 |
-| `nginx.conf` | Docker / Linux Nginx 配置示例 |
-| `nginx-windows.conf` | Windows Nginx 配置 |
-| `start-nginx.ps1` | Windows 启动脚本 |
-| `stop-nginx.ps1` | Windows 停止脚本 |
-
-前端默认请求：
-
-```text
-/api/ai/life/chat/sse
-```
-
-Nginx 默认监听：
-
-```text
-http://localhost:8080
-```
-
-后端默认地址：
-
-```text
-http://localhost:8124/api
-```
-
-直接访问 `http://localhost:8124/` 返回 404 是正常的，因为后端设置了 context path `/api`，且根路径没有页面。页面由 `frontend` 下的 Nginx 提供。
-
-## API
-
-Controller：
-
-```text
-src/main/java/com/yupi/lifeassistant/controller/LifeAssistantController.java
-```
-
-后端配置：
+## 主要配置
 
 ```yaml
 server:
   port: 8124
   servlet:
     context-path: /api
+
+spring:
+  ai:
+    dashscope:
+      chat:
+        options:
+          model: qwen-max
+
+life-assistant:
+  workspace: D:/codex/life-assistant-agent/tmp
+  memory:
+    queue:
+      max-active-messages: 30
+      keep-recent-messages: 16
+      compress-batch-messages: 10
+      max-active-chars: 18000
+    sleeptime:
+      trigger-user-messages: 20
+      recent-message-limit: 40
+      lock-minutes: 10
+  safety:
+    tool-permission-mode: default
+    sandbox:
+      timeout-seconds: 5
+      max-output-chars: 8000
+      allowed-languages: [java]
+  vectorstore:
+    auto-init: true
+    force-reinit: false
 ```
 
-主要接口：
+敏感配置放在 `application-local.yml` 或环境变量中，不应提交真实值。
 
-| 接口 | 说明 |
-| --- | --- |
-| `GET /api/ai/life/health` | 健康检查 |
-| `GET /api/ai/life/agents` | 查看当前可用 Agent |
-| `GET /api/ai/life/chat` | 同步对话 |
-| `GET /api/ai/life/chat/sse` | SSE 流式对话 |
+## HTTP API
 
-示例：
+后端基础地址：`http://localhost:8124/api`
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `GET` | `/ai/life/health` | 健康状态、默认 Agent、模型提供方和当前权限模式 |
+| `GET` | `/ai/life/agents` | 查询已注册 Agent |
+| `GET` | `/ai/life/chat` | 非流式对话 |
+| `GET` | `/ai/life/chat/sse` | SSE 流式对话 |
+| `GET` | `/ai/life/pending-permission` | 查询待处理工具权限请求 |
+| `POST` | `/ai/life/tool-permission` | 提交 `ALLOW` 或 `DENY` |
+| `POST` | `/ai/life/tool-permission-mode` | 运行时切换权限模式 |
+| `DELETE` | `/ai/life/conversations/{chatId}` | 删除一次 root 对话的持久化记录 |
+
+流式请求示例：
 
 ```text
-GET /api/ai/life/chat/sse?message=帮我规划一个高效周末&chatId=abc
-GET /api/ai/life/chat/sse?message=帮我查资料并制定计划&chatId=abc&agentId=life-coordinator
-GET /api/ai/life/chat?message=帮我列一个出行清单&chatId=abc&agentId=life-planner
+GET /api/ai/life/chat/sse?message=帮我规划周末&chatId=<uuid>&agentId=life-coordinator
 ```
 
-## 项目结构
+模式切换示例：
 
 ```text
-life-assistant-agent
-├─ frontend
-├─ src/main/java/com/yupi/lifeassistant
-│  ├─ advisor
-│  ├─ agent
-│  ├─ app
-│  ├─ chatmemory
-│  ├─ config
-│  ├─ constant
-│  ├─ controller
-│  ├─ memory
-│  ├─ rag
-│  ├─ safety
-│  ├─ skill
-│  └─ tools
-├─ src/main/resources
-│  ├─ application.yml
-│  ├─ document
-│  └─ skills
+POST /api/ai/life/tool-permission-mode?mode=ACCEPT_EDITS
+```
+
+`chatId` 是前端生成的 UUID。同一对话必须复用同一个 root `chatId`，后端会为每个 Agent 派生独立 conversationId。
+
+## 前端与 Nginx
+
+前端位于 `frontend/`，默认通过同源 `/api` 调用后端。Nginx 默认监听：
+
+```text
+http://localhost:8080
+```
+
+前端提供：
+
+- 本地多对话列表和 UUID `chatId`。
+- SSE 最终回答展示与自动滚动。
+- 工具权限确认卡片，确认后立即移除。
+- `DEFAULT`、`ACCEPT_EDITS`、`PLAN`、`BYPASS`、`YOLO` 模式选择器。
+- 删除对话并同步调用后端清理 Redis 和 PGVector。
+- API Base URL 设置和明暗主题。
+
+Nginx 使用 `proxy_buffering off` 和 `X-Accel-Buffering: no`，避免代理缓存 SSE。
+
+## 目录
+
+```text
+life-assistant-agent/
+├─ src/main/java/com/yupi/lifeassistant/
+│  ├─ agent/          Agent 循环、注册表、协调器和后台记忆整理
+│  ├─ app/            应用编排入口
+│  ├─ chatmemory/     Redis 对话消息仓库
+│  ├─ controller/     HTTP/SSE 接口
+│  ├─ memory/         上下文队列与分层记忆
+│  ├─ rag/            文档加载、版本同步和 PGVector
+│  ├─ safety/         权限、密钥和工具安全包装
+│  ├─ skill/          Skill 仓库与模型
+│  └─ tools/          工具实现与注册
+├─ src/main/resources/
+│  ├─ document/       内置生活知识 Markdown
+│  └─ skills/         Skill 定义
+├─ frontend/          静态前端与 Nginx
 ├─ README-MEMORY.md
 ├─ README-MULTI-AGENT.md
-├─ README-SAFETY.md
-└─ pom.xml
+└─ README-SAFETY.md
 ```
 
 ## 推荐阅读顺序
 
-如果想理解主流程：
+1. `LifeAssistantController`
+2. `LifeAssistantApp`
+3. `AgentRegistry`
+4. `LifeManusAgent`
+5. `BaseAgent`
+6. `ToolCallAgent`
+7. `ToolRegistration`
+8. `SecureToolCallback`
+9. `AgentCoordinator`
+10. `LifeMemoryService`
+11. `ContextQueueManager`
+12. `ChatMemoryCompressAgent`
 
-```text
-1. LifeAssistantController
-2. LifeAssistantApp
-3. AgentRegistry
-4. LifeManusAgent
-5. BaseAgent
-6. ToolCallAgent
-7. ToolRegistration
-8. AgentDelegationTool
-9. AgentCoordinator
-```
+## 当前边界
 
-如果想理解记忆管理：
-
-```text
-1. README-MEMORY.md
-2. LifeMemoryService
-3. LettaChatMemory
-4. ContextQueueManager
-5. ChatMemoryCompressAgent
-6. SupervisorSleepTimeMemoryAgent
-7. RedisChatMemoryRepository
-```
-
-如果想理解多 Agent：
-
-```text
-1. README-MULTI-AGENT.md
-2. AgentRegistry
-3. AgentDelegationTool
-4. AgentCoordinator
-5. ToolRegistration
-```
-
-如果想理解 Skill 系统：
-
-```text
-1. README.md 的 Skill 系统章节
-2. src/main/resources/skills/*/SKILL.md
-3. AgentSkillRepository
-4. SkillTool
-5. ToolRegistration
-```
-
-如果想理解安全机制：
-
-```text
-1. README-SAFETY.md
-2. SafetyProperties
-3. ToolSafetyService
-4. SecureToolCallback
-5. ToolRegistration
-6. SandboxedCodeTool
-7. SecretManager
-8. LifeMemoryService
-```
-
-## 当前设计取舍
-
-当前实现优先保证流程清晰和可调试：
-
-- Delegation 是同步执行，不是异步 worker job。
-- worker 结果既作为 tool result 返回给 supervisor，也写入 shared memory。
-- Redis 保留完整对话历史，进入模型上下文的是 FIFO active window + compressed summary。
-- PGVector 分成 RAG 知识库和 archival memory 两张表，避免职责混杂。
-- Skill 使用 `SKILL.md` 资源文件加 core memory 索引；每轮只暴露名称和简述，完整规则按需读取。
-- 前端只负责 chatId、SSE 展示和本地 thread 状态；core memory 是 Agent 级长期状态，不随单个对话删除。
-
-后续如果要继续增强，可以考虑：
-
-- 将 `AgentCoordinator` 改造成异步任务调度器。
-- 给 worker job 增加状态机和持久化。
-- 在前端加入 Agent 选择器，调用 `/api/ai/life/agents` 动态展示可用 Agent。
-- 给 shared memory 增加可视化调试页面。
+- 权限模式是应用进程级状态，不是按用户或按会话隔离。
+- 核心记忆按 Agent ID 隔离，当前没有 userId 维度；多用户部署前应改为 `userId:agentId`。
+- 标签委派当前同步顺序执行，不是后台任务队列。
+- `runCode` 是本地受限进程，不等同于容器或虚拟机级强隔离。
+- 前端对话正文保存在浏览器本地，后端状态保存在 Redis 和 PostgreSQL。

@@ -7,6 +7,7 @@ import com.yupi.lifeassistant.safety.PendingPermissionRegistry;
 import com.yupi.lifeassistant.safety.PermissionRequest;
 import com.yupi.lifeassistant.safety.SafetyProperties;
 import com.yupi.lifeassistant.safety.ToolPermissionAction;
+import com.yupi.lifeassistant.safety.ToolPermissionMode;
 import jakarta.annotation.Nullable;
 import jakarta.annotation.Resource;
 import org.springframework.http.HttpStatus;
@@ -22,6 +23,7 @@ import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -45,6 +47,16 @@ public class LifeAssistantController {
                 "defaultAgent", AgentRegistry.DEFAULT_AGENT_ID,
                 "modelProvider", "DashScope",
                 "toolPermissionMode", safetyProperties.getToolPermissionMode().name()
+        );
+    }
+
+    @PostMapping("/tool-permission-mode")
+    public Map<String, String> updateToolPermissionMode(@RequestParam String mode) {
+        ToolPermissionMode toolPermissionMode = parseToolPermissionMode(mode);
+        safetyProperties.setToolPermissionMode(toolPermissionMode);
+        return Map.of(
+                "status", "updated",
+                "toolPermissionMode", toolPermissionMode.name()
         );
     }
 
@@ -134,5 +146,24 @@ public class LifeAssistantController {
             throw new IllegalArgumentException("chatId cannot be blank");
         }
         return chatId.trim();
+    }
+
+    private ToolPermissionMode parseToolPermissionMode(String mode) {
+        if (mode == null || mode.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "mode cannot be blank");
+        }
+        String normalized = mode.trim()
+                .replace('-', '_')
+                .replace(' ', '_')
+                .toUpperCase(Locale.ROOT);
+        if ("ACCEPTEDITS".equals(normalized)) {
+            normalized = ToolPermissionMode.ACCEPT_EDITS.name();
+        }
+        try {
+            return ToolPermissionMode.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "无效的工具权限模式: " + mode + "，请使用 DEFAULT、ACCEPT_EDITS、PLAN、BYPASS 或 YOLO", e);
+        }
     }
 }
